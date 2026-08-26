@@ -1,0 +1,322 @@
+{
+  "players": [
+    [
+      "1291011661297090604",
+      {
+        "id": "1291011661297090604",
+        "name": "nuneking",
+        "race": null,
+        "class": "none",
+        "subclass": null,
+        "appearance": {
+          "hair": "brown",
+          "hairStyle": "short",
+          "skin": "fair",
+          "eyes": "brown",
+          "height": "average",
+          "build": "average",
+          "markings": "none",
+          "voice": "default"
+        },
+        "title": null,
+        "attributes": {
+          "str": 5,
+          "dex": 5,
+          "con": 5,
+          "int": 5,
+          "wis": 5,
+          "cha": 5
+        },
+        "unspentAttrPoints": 11,
+        "hp": 64,
+        "mp": 53,
+        "stamina": 62,
+        "rage": 0,
+        "energy": 100,
+        "level": 2,
+        "exp": 244,
+        "prestige": 0,
+        "talentPoints": 2,
+        "perkPoints": 0,
+        "skillPoints": 1,
+        "atk": 27,
+        "magAtk": 16,
+        "def": 17,
+        "magDef": 10,
+        "speed": 15,
+        "critChance": 0.055,
+        "critDamage": 1.5,
+        "dodge": 0.025,
+        "parry": 0.028,
+        "block": 0.025,
+        "resistances": {
+          "physical": 0,
+          "fire": 0,
+          "ice": 0,
+          "lightning": 0,
+          "earth": 0,
+          "wind": 0,
+          "water": 0,
+          "light": 0,
+          "shadow": 0,
+          "poison": 0.05,
+          "arcane": 0
+        },
+        "statusEffects": [],
+        "activeBuffs": {},
+        "cooldowns": {},
+        "combo": 19,
+        "momentum": 0,
+        "killStreak": 0,
+        "gold": 276,
+        "bankGold": 0,
+        "inventory": {
+          "Health Potion (S)": 2,
+          "Iron Ore": 2,
+          "Oak Log": 5,
+          "Rabbit Pelt": 4,
+          "Iron Gloves": 1,
+          "Iron Ring": 3,
+          "Strange Relic": 2,
+          "Hero's Remnant": 1,
+          "Salted Bounty": 1,
+          "Void Charm": 1,
+          "Iron Mace": 1,
+          "Iron Rapier": 2,
+          "Iron Relic": 1,
+          "Iron Armor": 1
+        },
+        "bankItems": {},
+        "storageItems": {},
+        "equipped": {
+          "weapon": null,
+          "offhand": null,
+          "armor": {
+            "id": "itm_mt9pkl71_uvcy5u",
+            "name": "Iron Armor",
+            "rarityId": "common",
+            "rarityName": "Common",
+            "color": 10395294,
+            "slot": "armor",
+            "type": "armor",
+            "kind": "equipment",
+            "kindName": "Equipment",
+            "tier": 1,
+            "level": 2,
+            "element": "arcane",
+            "value": 12,
+            "statBonus": {
+              "def": 7,
+              "health": 6
+            },
+            "affixes": [],
+            "sockets": 0,
+            "gems": [],
+            "legendary": false,
+            "set": null
+          },
+          "helm": {
+            "id": "itm_mt9pkv6c_baq7am",
+            "name": "Iron Helm",
+            "rarityId": "common",
+            "rarityName": "Common",
+            "color": 10395294,
+            "slot": "helm",
+            "type": "helm",
+            "kind": "equipment",
+            "kindName": "Equipment",
+            "tier": 1,
+            "level": 2,
+            "element": "poison",
+            "value": 10,
+            "statBonus": {
+              "def": 5,
+              "magDef": 3
+            },
+            "affixes": [],
+            "sockets": 0,
+            "gems": [],
+            "legendary": false,
+            "set": null
+          },
+          "boots": null,
+          "gloves": null,
+          "amulet": null,
+          "ring1": null,
+          "ring2": null,
+          "relic": null
+        },
+        "loadouts": {},
+        "zone": 1,
+        "explored": {
+          "__set": true,
+          "values": [
+            1
+          ]
+        },
+        "waypoints": {
+          "__set": true,
+          "values": [
+            1
+          ]
+        },
+        "fastTravelPoints": [],
+        "skills": {
+          "mining": 1,
+          "woodcutting": 1,
+          "fishing": 1,
+          "foraging": 1,
+          "hunting": 4,
+          "farming": 1
+        },
+        "professions": {
+          "blacksmithing": 1,
+          "alchemy": 1,
+          "cooking": 1,
+          "enchanting": 1,
+          "tailoring": 1,
+          "jewelcrafting": 1,
+          "inscription": 1,
+          "carpentry": 1
+        },
+        "abilities": [],
+        "passives": [],
+        "ultimate": null,
+        "talentTree": {},
+        "partyId": null,
+        "guildId": null,
+        "factionId": null,
+        "reputation": {},
+        "karma": 0,
+        "morality": 0,
+        "friends": [],
+        "quests": {
+          "active": [],
+          "completed": [],
+          "dailyDone": 0,
+          "weeklyDone": 0
+        },
+        "achievements": {
+          "__set": true,
+          "values": []
+        },
+        "bestiary": {
+          "__set": true,
+          "values": [
+            "skeleton_scout_t1",
+            "construct_scout_t1",
+            "plant_cursed_t1",
+            "spider_ancient_t1",
+            "skeleton_shaman_t1",
+            "construct_leader_t1"
+          ]
+        },
+        "codex": {
+          "__set": true,
+          "values": []
+        },
+        "collections": {
+          "cards": {
+            "__set": true,
+            "values": []
+          },
+          "trophies": {
+            "__set": true,
+            "values": []
+          },
+          "relics": {
+            "__set": true,
+            "values": []
+          }
+        },
+        "pets": [],
+        "mounts": [],
+        "companions": [],
+        "activePet": null,
+        "activeMount": null,
+        "house": null,
+        "furniture": {},
+        "mode": "none",
+        "difficulty": "normal",
+        "deaths": 0,
+        "kills": 6,
+        "playtimeMin": 64,
+        "lastDaily": 0,
+        "lastWeekly": 0,
+        "createdAt": 1787722509620,
+        "settings": {
+          "colorblind": false,
+          "reducedMotion": false,
+          "damageNumbers": true,
+          "compactMode": false
+        },
+        "statMultipliers": {
+          "xp": 1,
+          "gold": 1,
+          "loot": 1
+        },
+        "nextExp": 324,
+        "guarding": false,
+        "currencies": {
+          "tokens": 3,
+          "gems": 5
+        },
+        "seasonXp": 32,
+        "counterWindow": false,
+        "maxHp": 106,
+        "maxMp": 53,
+        "maxStamina": 62,
+        "_items": {
+          "Iron Armor": {
+            "id": "itm_mt9pkl71_uvcy5u",
+            "name": "Iron Armor",
+            "rarityId": "common",
+            "rarityName": "Common",
+            "color": 10395294,
+            "slot": "armor",
+            "type": "armor",
+            "kind": "equipment",
+            "kindName": "Equipment",
+            "tier": 1,
+            "level": 2,
+            "element": "arcane",
+            "value": 12,
+            "statBonus": {
+              "def": 7,
+              "health": 6
+            },
+            "affixes": [],
+            "sockets": 0,
+            "gems": [],
+            "legendary": false,
+            "set": null
+          },
+          "Iron Helm": {
+            "id": "itm_mt9pkv6c_baq7am",
+            "name": "Iron Helm",
+            "rarityId": "common",
+            "rarityName": "Common",
+            "color": 10395294,
+            "slot": "helm",
+            "type": "helm",
+            "kind": "equipment",
+            "kindName": "Equipment",
+            "tier": 1,
+            "level": 2,
+            "element": "poison",
+            "value": 10,
+            "statBonus": {
+              "def": 5,
+              "magDef": 3
+            },
+            "affixes": [],
+            "sockets": 0,
+            "gems": [],
+            "legendary": false,
+            "set": null
+          }
+        }
+      }
+    ]
+  ]
+}
