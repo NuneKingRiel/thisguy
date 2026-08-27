@@ -15,6 +15,12 @@ const __singleDir = __dirname;
 const __mods = {};
 function __def(name, fn) { __mods[name] = { fn: fn, loaded: false, exports: {} }; }
 const __reqMap = {
+  "src/commands/boss": {
+    "../core/combat": "src/core/combat",
+    "../world/bossdefs": "src/world/bossdefs",
+    "../world/zones": "src/world/zones",
+    "../crafting/recipes": "src/crafting/recipes"
+  },
   "src/commands/character": {
     "../config": "src/config",
     "../core/schema": "src/core/schema",
@@ -59,7 +65,8 @@ const __reqMap = {
     "./economy": "src/commands/economy",
     "./quests": "src/commands/quests",
     "./meta": "src/commands/meta",
-    "./pvp": "src/commands/pvp"
+    "./pvp": "src/commands/pvp",
+    "./boss": "src/commands/boss"
   },
   "src/commands/meta": {
     "../core/schema": "src/core/schema",
@@ -93,6 +100,14 @@ const __reqMap = {
     "../world/quests": "src/world/quests",
     "../config": "src/config"
   },
+  "src/core/bossfight": {
+    "../util": "src/util",
+    "./statusEffects": "src/core/statusEffects",
+    "../config": "src/config",
+    "../world/bossdefs": "src/world/bossdefs",
+    "./combat": "src/core/combat",
+    "./progression": "src/core/progression"
+  },
   "src/core/combat": {
     "../config": "src/config",
     "../util": "src/util",
@@ -100,7 +115,10 @@ const __reqMap = {
     "./statusEffects": "src/core/statusEffects",
     "../world/enemies": "src/world/enemies",
     "../world/loot": "src/world/loot",
-    "../world/zones": "src/world/zones"
+    "../world/dungeonevents": "src/world/dungeonevents",
+    "../world/zones": "src/world/zones",
+    "./progression": "src/core/progression",
+    "./bossfight": "src/core/bossfight"
   },
   "src/core/features": {
     "../util": "src/util"
@@ -129,6 +147,16 @@ const __reqMap = {
     "../util": "src/util",
     "../core/progression": "src/core/progression"
   },
+  "src/world/bossdefs": {
+    "../util": "src/util",
+    "../config": "src/config"
+  },
+  "src/world/dungeonevents": {
+    "../util": "src/util",
+    "../core/statusEffects": "src/core/statusEffects",
+    "./loot": "src/world/loot",
+    "../core/schema": "src/core/schema"
+  },
   "src/world/enemies": {
     "../config": "src/config",
     "../util": "src/util",
@@ -156,7 +184,8 @@ const __reqMap = {
     "./src/world/zones": "src/world/zones",
     "./src/util": "src/util",
     "./src/commands/world": "src/commands/world",
-    "./src/core/combat": "src/core/combat"
+    "./src/core/combat": "src/core/combat",
+    "./src/commands/social": "src/commands/social"
   }
 };
 function __load(name) {
@@ -175,6 +204,133 @@ function __requireFrom(mod, spec) {
   if (!target) throw new Error("Cannot resolve embedded require '" + spec + "' from " + mod);
   return __load(target);
 }
+
+// ---------------------- embedded module: src/commands/boss ----------------------
+__def("src/commands/boss", function (module, exports, require) {
+// ============================================================
+// commands/boss.js — map bosses (summon + join by traveling)
+// and server bosses (whole server joins).
+//   playrpg summon                      -> summon this zone's map boss (needs Summoning Stone)
+//   playrpg summon server <name>        -> summon a server boss (Megalondon / Lichen / Chronos)
+//   playrpg boss                        -> active boss fights
+//   playrpg boss join [server]          -> join the active boss fight
+// ============================================================
+
+const { startBossEncounter, getBossBattle, joinBossBattle, getPlayerBattle, battleStatusText } = require("../core/combat");
+const { createMapBoss, createServerBoss, SERVER_BOSSES } = require("../world/bossdefs");
+const { getZone } = require("../world/zones");
+const { findRecipe } = require("../crafting/recipes");
+
+// which key item summons which server boss
+const SERVER_BOSS_KEYS = {
+  megalondon: { item: "Titanic Horn of the Abyss", recipeId: "titanic_horn" },
+  lichen:     { item: "Worldseed of the Green God", recipeId: "worldseed" },
+  chronos:    { item: "Chronos Key", recipeId: "chronos_key" },
+};
+
+function keyRequirementText(bossKey) {
+  const info = SERVER_BOSS_KEYS[bossKey];
+  if (!info) return "";
+  const recipe = findRecipe(info.recipeId);
+  const mats = Object.entries(recipe.req).map(([k, v]) => `${v}x ${k}`).join(", ");
+  return `**${info.item}** — craft: \`playrpg craft do ${info.recipeId}\`\nRequires: ${mats}`;
+}
+
+const handlers = {
+  summon(message, args, player) {
+    const sub = (args[0] || "").toLowerCase();
+
+    // ---- SERVER BOSS ----
+    if (sub === "server") {
+      const name = (args[1] || "").toLowerCase();
+      if (!SERVER_BOSSES[name]) {
+        return `❌ Unknown server boss. Available:\n` + Object.values(SERVER_BOSSES).map(b => `• ${b.emoji} **${b.name}, ${b.title}** (\`${b.key}\`) — ${b.desc}`).join("\n") +
+          `\n\nEach requires a crafted **key item** (insane material costs):\n` +
+          Object.keys(SERVER_BOSSES).map(k => `• ${keyRequirementText(k)}`).join("\n") +
+          `\n\nSummon: \`playrpg summon server <name>\` (level 20+, one at a time)`;
+      }
+      if (getBossBattle({ server: true })) return "❌ A server boss is already active! Join it with `playrpg boss join server`.";
+      if (player.level < 20) return "❌ Server bosses require **level 20+** to summon.";
+      const keyInfo = SERVER_BOSS_KEYS[name];
+      const keyItem = keyInfo.item;
+      if ((player.inventory[keyItem] || 0) <= 0) {
+        return `❌ You need the **${keyItem}** to summon ${SERVER_BOSSES[name].name}!\n${keyRequirementText(name)}`;
+      }
+      player.inventory[keyItem] -= 1;
+      if (player.inventory[keyItem] <= 0) delete player.inventory[keyItem];
+      const boss = createServerBoss(name, player.level);
+      const res = startBossEncounter([player], boss, { zoneId: player.zone, server: true, summonerId: player.id });
+      if (!res.ok) return `❌ ${res.reason}`;
+      const b = SERVER_BOSSES[name];
+      return `🌍 **${boss.name}, ${boss.title}** has been summoned by **${player.name}** (Lv ${boss.level}) — the **${keyItem}** crumbles to dust!\n\n${boss.introText}\n\n` +
+        `👥 **EVERYONE IN THE SERVER** can join: \`playrpg boss join server\`\n` +
+        `Mechanics: ${b.desc}\n` +
+        `Fight: \`playrpg attack\` | \`skill <id>\` | \`item <name>\` | \`guard\` | \`battle\`\n` +
+        (boss.mechanics.lifeTrees ? `When Life Trees appear, focus them: \`playrpg attack tree\`\n` : "") +
+        (boss.mechanics.sanity ? `🧠 Watch your **sanity** — at 0 you become Chronos's ally! Guard to recover some.\n` : "");
+    }
+
+    // ---- MAP BOSS ----
+    if ((player.inventory["Summoning Stone"] || 0) <= 0) {
+      return "❌ You need a **Summoning Stone** to call a map boss. Craft it: `playrpg craft do summoning_stone`.";
+    }
+    const zone = getZone(player.zone);
+    if (getBossBattle({ server: false, zoneId: player.zone })) {
+      return `❌ A map boss is already active in this zone! Join it: \`playrpg boss join\``;
+    }
+    player.inventory["Summoning Stone"] -= 1;
+    if (player.inventory["Summoning Stone"] <= 0) delete player.inventory["Summoning Stone"];
+    const boss = createMapBoss(zone, player.level);
+    const res = startBossEncounter([player], boss, { zoneId: player.zone, server: false, summonerId: player.id });
+    if (!res.ok) return `❌ ${res.reason}`;
+    return `🗺️ **MAP BOSS SUMMONED in ${zone.name}!**\n\n${boss.introText}\n` +
+      `⚠️ Lv ${boss.level} | HP ${boss.maxHp} | Skills: ${boss.skills.map(s => s.name).join(", ")}\n\n` +
+      `**Other players can only join after traveling here** (\`playrpg travel ${player.zone}\`) — then: \`playrpg boss join\`\n` +
+      `Fight: \`playrpg attack\` | \`skill <id>\` | \`item <name>\` | \`guard\``;
+  },
+
+  boss(message, args, player) {
+    const sub = (args[0] || "").toLowerCase();
+
+    if (sub === "join") {
+      const wantServer = (args[1] || "").toLowerCase() === "server";
+      const anyMap = getBossBattle({ server: false });
+      const mapBattle = anyMap && anyMap.zoneId === player.zone ? anyMap : null;
+      const serverBattle = getBossBattle({ server: true });
+      let target = wantServer ? serverBattle : (mapBattle || serverBattle);
+      if (!target) {
+        if (anyMap && anyMap.zoneId !== player.zone) {
+          return `❌ A map boss (**${anyMap.boss.name}**) is active in **Zone ${anyMap.zoneId}** (${getZone(anyMap.zoneId).name}). Travel there first: \`playrpg travel ${anyMap.zoneId}\``;
+        }
+        return "❌ No active boss fight to join right now.";
+      }
+      if (getPlayerBattle(player.id)) return "❌ Finish your current battle first.";
+      const res = joinBossBattle(player, target);
+      if (!res.ok) return `❌ ${res.reason === "boss_full" ? "The server boss fight is full (12 max)!" : res.reason}`;
+      const boss = target.boss;
+      return `⚔️ **${player.name} joined the fight against ${boss.name}, ${boss.title}!**\n\n${battleStatusText(target)}`;
+    }
+
+    // status / list
+    const mapBattle = getBossBattle({ server: false });
+    const serverBattle = getBossBattle({ server: true });
+    const mine = getPlayerBattle(player.id);
+    let s = `🐲 **BOSS BATTLES**\n\n`;
+    if (mapBattle) {
+      s += `🗺️ **Map boss** in Zone ${mapBattle.zoneId} (${getZone(mapBattle.zoneId).name}): **${mapBattle.boss.name}** ${mapBattle.boss.currentHp}/${mapBattle.boss.maxHp} HP — ${mapBattle.players.length} fighter(s)\n`;
+      s += `Join (must be in that zone): \`playrpg boss join\`\n`;
+    } else s += `🗺️ No active map boss. Summon one: \`playrpg summon\` (needs a Summoning Stone).\n`;
+    if (serverBattle) {
+      s += `\n🌍 **Server boss**: **${serverBattle.boss.name}, ${serverBattle.boss.title}** ${serverBattle.boss.currentHp}/${serverBattle.boss.maxHp} HP — ${serverBattle.players.length} fighter(s)\n`;
+      s += `Join (anyone in the server): \`playrpg boss join server\`\n`;
+    } else s += `\n🌍 No active server boss. Summon one: \`playrpg summon server <name>\`\n`;
+    if (mine?.isBoss) s += `\nYou're in the boss fight!\n\n${battleStatusText(mine)}`;
+    return s;
+  },
+};
+
+module.exports = handlers;
+});
 
 // ---------------------- embedded module: src/commands/character ----------------------
 __def("src/commands/character", function (module, exports, require) {
@@ -422,6 +578,7 @@ function _finish(battle, result) {
     }
   } else if (result.result === "defeat") {
     s = `💀 **DEFEAT!**\n` +
+      (result.levelLost?.length ? `📉 **Level lost:** ${result.levelLost.join(", ")} (and the stats that level gave)\n` : "") +
       (result.goldPenalty ? `You lost **${result.goldPenalty} gold** (5% death penalty).\n` : "") +
       (result.hardcoreWipe ? `☠️ **HARDCORE WIPE** — your character has been reset to level 1!\n` : "") +
       `\n${result.log.slice(-5).join("\n")}`;
@@ -449,7 +606,8 @@ const handlers = {
   attack(message, args, player) {
     const battle = getPlayerBattle(player.id);
     if (!battle) return "❌ No battle! Use `playrpg explore` to find enemies.";
-    const result = playerAction(battle, player, "attack");
+    // `attack tree` targets boss adds (Lichen's Life Trees)
+    const result = playerAction(battle, player, "attack", { target: args[0] ? args[0].toLowerCase() : null });
     if (result.ok === false) return _err(result);
     return _afterPlayerAction(battle, result, player);
   },
@@ -1217,8 +1375,9 @@ const economy = require("./economy");
 const quests = require("./quests");
 const meta = require("./meta");
 const pvp = require("./pvp");
+const boss = require("./boss");
 
-const MODULES = [character, world, combat, gather, craft, social, economy, quests, meta, pvp];
+const MODULES = [character, world, combat, gather, craft, social, economy, quests, meta, pvp, boss];
 
 // Flatten into one command map with aliases
 const COMMANDS = {};
@@ -1231,12 +1390,14 @@ const ALIASES = {
   guild: ["g"], bank: ["vault"], top: ["leaderboard", "lb"], bestiary: ["codex2"],
   stance: ["st"], auction: ["ah"], rotatingshop: ["rot"], traveling: ["merchant", "traveler"],
   currencies: ["cur"], features: ["catalog"], ranks: ["rank"], pvp: ["duel"],
-  pet: ["companion"], mount: ["ride"],
+  pet: ["companion"], mount: ["ride"], summon: ["summonboss"], boss: ["bosses"],
 };
 
 for (const mod of MODULES) {
-  for (const [name, handler] of Object.entries(mod)) {
-    COMMANDS[name] = handler;
+  for (const [name] of Object.entries(mod)) {
+    // dynamic wrapper: reads the module's CURRENT handler, so index.js
+    // overrides (AI flavor) take effect at runtime
+    COMMANDS[name] = (...a) => mod[name](...a);
   }
 }
 for (const [name, aliases] of Object.entries(ALIASES)) {
@@ -1315,6 +1476,7 @@ const handlers = {
       `**Crafting** — \`playrpg recipes <page>\` | \`playrpg recipes food <page>\` | \`playrpg recipes craft <page>\` | \`playrpg craft do <id>\` | \`playrpg discover\` | \`playrpg enchant\` | \`playrpg refine\`\n` +
       `**Quests** — \`playrpg quests\` | \`quests daily\` | \`weekly\` | \`monthly\` | \`bounty\` | \`main\` | \`quest accept <id>\` | \`quest answer <text>\` | \`quest choose <a|b>\`\n` +
       `**Economy** — \`playrpg inventory\` | \`equip <item>\` | \`iteminfo <item>\` | \`shop\` | \`buy <item>\` | \`sell <item>\` | \`bank\` | \`currencies\` | \`auction\` | \`rotatingshop\` | \`secretshop\` | \`traveling\` | \`treasure\` | \`dig\` | \`use <item>\`\n` +
+      `**Bosses** — \`playrpg summon\` (map boss, needs Summoning Stone — others join after traveling here) | \`playrpg summon server megalondon|lichen|chronos\` (needs crafted key item, whole server joins) | \`playrpg boss\` | \`playrpg boss join [server]\` | \`attack tree\` for Lichen's life trees\n` +
       `**Companions** — \`playrpg pet <name>\` (Wolf Cub, Baby Dragon...) | \`mount <name>\` (Riding Horse...) — craftable & they buff you\n` +
       `**Social** — \`playrpg party\` | \`guild\` | \`faction\` | \`friend\` | \`playrpg pvp @user [wager]\` — player duels\n` +
       `**Meta** — \`playrpg profile\` | \`stats\` | \`ranks\` | \`features\` | \`feature <name>\` | \`achievements\` | \`bestiary\` | \`codex\` | \`settings\` | \`top\``;
@@ -1954,17 +2116,20 @@ const handlers = {
 
   dungeon(message, args, player) {
     const zone = getZone(player.zone);
-    if (!zone.hasDungeon) return "❌ No dungeon in this zone. Find one with `playrpg map` (🕳️ markers).";
+    if (!zone.hasDungeon) return "❌ No dungeon in this zone. Find one with `playrpg map` (dungeons sit in every 10th zone).";
     const { generateQuest } = require("../world/quests");
-    const res = startEncounter(player, { zoneId: player.zone, elite: true });
+    const tier = zone.tier;
+    const totalFloors = Math.min(5, 2 + Math.ceil(tier / 25));
+    const bossFloor = Math.max(2, totalFloors);
+    const res = startEncounter(player, { zoneId: player.zone, dungeon: { zoneId: player.zone, floor: 1, totalFloors, bossFloor } });
     if (!res.ok) return res.reason === "already_in_battle" ? "❌ Finish your current battle first." : `❌ ${res.reason}`;
     // auto-accept dungeon quest if none active
     if (!player.quests.active.some(q => q.type === "dungeon" && q.zoneId === player.zone)) {
       const q = generateQuest(player, { type: "dungeon", zoneId: player.zone });
       player.quests.active.push(q);
     }
-    return `🏰 **DUNGEON: ${zone.dungeon.name}**\nDeep beneath ${zone.name}, something waits...\n\n` +
-      `${enemyIntro(res.battle.enemy)}\n\nUse \`playrpg attack\` to fight!`;
+    return `🏰 **DUNGEON: ${zone.dungeon.name}** (solo run)\n${totalFloors} floors, boss on floor ${bossFloor} — watch for traps and shrines between floors.\n\n` +
+      `${enemyIntro(res.battle.enemy)}\n\nUse \`playrpg attack\` — floors auto-advance!`;
   },
 };
 
@@ -2120,6 +2285,246 @@ module.exports = {
 };
 });
 
+// ---------------------- embedded module: src/core/bossfight ----------------------
+__def("src/core/bossfight", function (module, exports, require) {
+// ============================================================
+// bossfight.js — boss turn execution: sanity (Chronos), life
+// trees (Lichen), multi-strikes, corrupted allies, AoE skills.
+// combat.js calls bossTurn(battle) lazily when battle.boss exists.
+// ============================================================
+
+const { chance, clamp, pick, randInt } = require("../util");
+const { applyStatus, tickStatuses } = require("./statusEffects");
+const { ELEMENT_EMOJI } = require("../config");
+const { sanityMax } = require("../world/bossdefs");
+const { computeHit } = require("./combat");
+
+function _alive(battle) { return battle.players.filter(p => p.hp > 0); }
+
+// ---- sanity ---------------------------------------------------
+function initSanity(battle) {
+  if (!battle.boss?.mechanics?.sanity) return;
+  battle.sanity = battle.sanity || {};
+  for (const p of battle.players) {
+    if (!battle.sanity[p.id]) battle.sanity[p.id] = { cur: sanityMax(p), max: sanityMax(p) };
+  }
+}
+function sanityInfo(battle, player) {
+  const s = battle.sanity?.[player.id];
+  return s ? { cur: s.cur, max: s.max } : null;
+}
+function loseSanity(battle, player, fraction) {
+  if (!battle.sanity?.[player.id]) return;
+  const s = battle.sanity[player.id];
+  s.cur = Math.max(0, s.cur - Math.round(s.max * fraction));
+  return s;
+}
+function gainSanity(battle, player, fraction) {
+  if (!battle.sanity?.[player.id]) return;
+  const s = battle.sanity[player.id];
+  s.cur = Math.min(s.max, s.cur + Math.round(s.max * fraction));
+}
+
+/** Guarding recovers a little sanity (Chronos). */
+function onPlayerGuard(battle, player) {
+  if (!battle.boss?.mechanics?.sanity) return null;
+  gainSanity(battle, player, 0.06);
+  const s = battle.sanity[player.id];
+  return `🧠 ${player.name} steadies their mind (+${Math.round(s.max * 0.06)} sanity).`;
+}
+
+// ---- corruption -------------------------------------------------
+function corruptPlayer(battle, player) {
+  battle.corrupted = battle.corrupted || [];
+  // death penalty: corruption IS a death
+  const dp = require("./progression").applyDeathPenalty(player);
+  const lost = dp.ok && dp.lostLevel ? " and lost a level" : "";
+  battle.corrupted.push({
+    playerId: player.id,
+    name: `Corrupted ${player.name}`,
+    hp: Math.max(1, Math.round(player.maxHp * 0.4)),
+    maxHp: Math.max(1, Math.round(player.maxHp * 0.4)),
+    atk: Math.round(player.atk * 0.4),
+    def: Math.round(player.def * 0.4),
+    speed: Math.round(player.speed * 0.4),
+  });
+  battle.players = battle.players.filter(p => p.id !== player.id);
+  if (battle.sanity) delete battle.sanity[player.id];
+  return `😈 **${player.name} has gone MAD!** They turn into a Corrupted ally of ${battle.boss.name}${lost}!`;
+}
+
+function _freeCorrupted(battle) {
+  const freed = [];
+  for (const c of battle.corrupted || []) {
+    const p = battle.players.find(x => x.id === c.playerId) || null;
+    // player objects are referenced by id in schema.players — restore hp flag via battle.restoreHp
+    freed.push(c.name);
+  }
+  battle.corrupted = [];
+  return freed;
+}
+
+// ---- life trees (Lichen) -----------------------------------------
+function spawnTree(battle, count = 1) {
+  battle.adds = battle.adds || [];
+  const treeHp = Math.max(10, Math.round(battle.boss.maxHp * 0.05));
+  for (let i = 0; i < count; i++) {
+    battle.adds.push({ id: `tree_${battle.adds.length + 1}`, name: "Life Tree", hp: treeHp, maxHp: treeHp, type: "life_tree" });
+  }
+}
+function aliveTrees(battle) { return (battle.adds || []).filter(a => a.hp > 0); }
+/** Per-tree: +20% boss stats, heals boss 5% maxHp per turn. */
+function treeBuff(battle) {
+  const n = aliveTrees(battle).length;
+  return { mult: 1 + n * 0.2, n };
+}
+function treeHeal(battle) {
+  const n = aliveTrees(battle).length;
+  if (!n) return 0;
+  const heal = Math.round(battle.boss.maxHp * 0.05 * n);
+  battle.boss.currentHp = Math.min(battle.boss.maxHp, battle.boss.currentHp + heal);
+  return heal;
+}
+
+// ---- boss turn ----------------------------------------------------
+function bossTurn(battle) {
+  if (battle.state !== "active") return;
+  const boss = battle.boss;
+  const players = _alive(battle);
+  if (!players.length) return endBossDefeat(battle);
+
+  const { mult } = treeBuff(battle);
+  const treeHealed = treeHeal(battle);
+
+  // corrupted allies attack too
+  let corruptLog = "";
+  for (const c of battle.corrupted || []) {
+    if (c.hp > 0 && players.length && chance(0.7)) {
+      const target = players[randInt(0, players.length - 1)];
+      const dmg = Math.max(1, Math.round(c.atk * (100 / (100 + (target.def || 1)))));
+      target.hp = Math.max(0, target.hp - dmg);
+      corruptLog += `\n😈 **${c.name}** hits ${target.name} for **${dmg}**.`;
+    }
+  }
+
+  // boss status tick
+  const eTick = tickStatuses(boss, { isPlayer: false });
+  if (boss.currentHp <= 0) return endBossVictory(battle);
+
+  // choose a skill
+  const usable = boss.skills.filter(s => s.kind === "special" || !(s.cd > 0));
+  const skill = usable.length && chance(0.55) ? usable[randInt(0, usable.length - 1)] : null;
+
+  let logLines = [];
+  if (treeHealed > 0) logLines.push(`🌳 Life trees heal **${boss.name}** for **${treeHealed}**.`);
+
+  if (skill) {
+    if (skill.kind === "special") {
+      skill.cd = skill.cooldown || 3;
+      const specialLog = runSpecial(battle, boss, skill);
+      if (specialLog) logLines.push(specialLog);
+    } else {
+      skill.cd = skill.cooldown;
+      logLines.push(...runBossSkill(battle, boss, skill, mult));
+    }
+  } else {
+    // basic attack — Chronos can multi-strike
+    const strikes = boss.mechanics?.strikes ? rollStrikes() : 1;
+    for (let s = 0; s < strikes; s++) {
+      if (!_alive(battle).length) break;
+      const target = _alive(battle)[randInt(0, _alive(battle).length - 1)];
+      const dmg = Math.max(1, Math.round(boss.atk * mult * (100 / (100 + target.def))));
+      target.hp = Math.max(0, target.hp - dmg);
+      logLines.push(`${boss.emoji || "💥"} **${boss.name}** strikes ${target.name} for **${dmg}**${strikes > 1 ? ` (strike ${s + 1}/${strikes})` : ""}.`);
+    }
+  }
+  if (corruptLog) logLines.push(corruptLog.trim());
+  battle.log.push(...logLines);
+
+  // sanity re-check + all-down
+  for (const p of _alive(battle)) {
+    const s = battle.sanity?.[p.id];
+    if (s && s.cur <= 0) {
+      battle.log.push(corruptPlayer(battle, p));
+      if (!_alive(battle).length) return endBossDefeat(battle);
+    }
+  }
+  if (!_alive(battle).length) return endBossDefeat(battle);
+  battle.turn = _alive(battle)[0]?.id || null;
+  battle.round += 1;
+}
+
+function rollStrikes() {
+  const r = Math.random();
+  if (r < 0.07) return 4;      // quad strike
+  if (r < 0.25) return 3;      // triple strike
+  if (r < 0.55) return 2;      // double strike
+  return 1;
+}
+
+function runSpecial(battle, boss, skill) {
+  switch (skill.special) {
+    case "spawnTree": spawnTree(battle, 1); return `🌳 **${boss.name}** plants a **Life Tree**! (Target it with \`attack tree\` — it buffs the boss +20% per tree and heals it 5%/turn.)`;
+    case "spawnTree2": spawnTree(battle, 2); return `🌳🌳 **${boss.name}** summons TWO **Life Trees**!`;
+    case "healBoss": {
+      const h = Math.round(boss.maxHp * 0.08);
+      boss.currentHp = Math.min(boss.maxHp, boss.currentHp + h);
+      return `🍃 **${boss.name}** channels nature, healing **${h}** HP.`;
+    }
+    case "healTrees": {
+      const trees = aliveTrees(battle);
+      for (const t of trees) t.hp = Math.min(t.maxHp, t.hp + Math.round(t.maxHp * 0.2));
+      return `☀️ The trees photosynthesize, restoring 20% of their health.`;
+    }
+    case "healSelf": {
+      const h = Math.round(boss.maxHp * 0.1);
+      boss.currentHp = Math.min(boss.maxHp, boss.currentHp + h);
+      return `⏱️ **${boss.name}** rewinds its wounds, healing **${h}** HP.`;
+    }
+    default: return null;
+  }
+}
+
+function runBossSkill(battle, boss, skill, mult) {
+  const targets = skill.aoe ? _alive(battle) : [_alive(battle)[randInt(0, _alive(battle).length - 1)]];
+  const lines = [`${ELEMENT_EMOJI[skill.element] || ""} **${boss.name}** uses **${skill.name}**!${skill.aoe ? " (ALL players)" : ""}`];
+  for (const p of targets) {
+    if (!p || p.hp <= 0) continue;
+    const hit = computeHit(boss, p, { power: skill.power, element: skill.element, isMagical: true, piercing: skill.piercing || 0 });
+    if (!hit.dodged) {
+      p.hp = Math.max(0, p.hp - hit.damage);
+      lines.push(hit.logLine);
+      // sanity damage (Chronos)
+      if (skill.sanityDmg > 0) {
+        const s = loseSanity(battle, p, skill.sanityDmg);
+        if (s) lines.push(`🧠 ${p.name} loses **${Math.round(s.max * skill.sanityDmg)}** sanity (${s.cur}/${s.max}).`);
+      }
+      if (skill.statusId && chance(skill.statusChance || 0)) {
+        applyStatus(p, skill.statusId, { potency: Math.max(1, Math.round(boss.magAtk * 0.08)), duration: 2 });
+        lines.push(`😵 ${p.name} is afflicted by **${skill.statusId.replace(/_/g, " ")}**!`);
+      }
+    }
+  }
+  return lines;
+}
+
+function endBossVictory(battle) {
+  const { endBattle } = require("./combat");
+  battle.boss.currentHp = 0;
+  return endBattle(battle, "victory");
+}
+function endBossDefeat(battle) {
+  const { endBattle } = require("./combat");
+  return endBattle(battle, "defeat");
+}
+
+module.exports = {
+  initSanity, sanityInfo, loseSanity, gainSanity, onPlayerGuard,
+  corruptPlayer, spawnTree, aliveTrees, treeBuff, treeHeal,
+  bossTurn, rollStrikes,
+};
+});
+
 // ---------------------- embedded module: src/core/combat ----------------------
 __def("src/core/combat", function (module, exports, require) {
 // ============================================================
@@ -2135,6 +2540,7 @@ const { activeBattles, addExp, addItemObject, equippedItem } = require("./schema
 const { applyStatus, tickStatuses, hasStatus, removeStatus, getEffectiveStats } = require("./statusEffects");
 const { createEnemyInstance, getBossForZone, enemyIntro } = require("../world/enemies");
 const { rollLoot, itemSummary } = require("../world/loot");
+const { rollDungeonEvent, applyDungeonEvent } = require("../world/dungeonevents");
 
 // One signature ability per class, learned FREE at character creation so
 // every new hero can use skills from level 1.
@@ -2374,14 +2780,17 @@ function _createBattle(players, { zoneId, elite = false, aiEnemy = null, dungeon
     difficultyMult: enemy.difficultyMult,
   };
   activeBattles.set(battle.id, battle);
-  for (const p of players) activeBattles.set(`player_${p.id}`, battle);
+  for (const p of players) {
+    require("./progression").resetDeathFlag(p);
+    activeBattles.set(`player_${p.id}`, battle);
+  }
   return battle;
 }
 
 /** Solo encounter (unchanged behaviour for single players). */
-function startEncounter(player, { zoneId, elite = false, aiEnemy = null }) {
+function startEncounter(player, { zoneId, elite = false, aiEnemy = null, dungeon = null }) {
   if (activeBattles.has(`player_${player.id}`)) return { ok: false, reason: "already_in_battle" };
-  return { ok: true, battle: _createBattle([player], { zoneId, elite, aiEnemy }) };
+  return { ok: true, battle: _createBattle([player], { zoneId, elite, aiEnemy, dungeon }) };
 }
 
 /** PARTY encounter: all members (in the zone) fight the same enemy together. */
@@ -2396,6 +2805,44 @@ function startPartyEncounter(party, { zoneId, elite = false, dungeon = null }) {
 
 function getPlayerBattle(playerId) {
   return activeBattles.get(`player_${playerId}`) || null;
+}
+
+// ---- BOSS BATTLES (map bosses + server bosses) -------------------
+const bossBattles = { map: null, server: null };
+
+/** Start a boss fight (map or server). `boss` is also battle.enemy. */
+function startBossEncounter(players, boss, { zoneId, server = false, summonerId = null } = {}) {
+  for (const m of players) {
+    if (activeBattles.has(`player_${m.id}`)) return { ok: false, reason: "member_in_battle", member: m.name };
+  }
+  const battle = _createBattle(players, { zoneId, aiEnemy: boss });
+  battle.boss = boss;            // same object as battle.enemy
+  battle.isBoss = true;
+  battle.summonerId = summonerId;
+  battle.serverBoss = server;
+  battle.adds = [];
+  battle.corrupted = [];
+  require("./bossfight").initSanity(battle);
+  if (server) bossBattles.server = battle;
+  else bossBattles.map = battle;
+  return { ok: true, battle };
+}
+
+/** Find the active boss battle (map one is zone-scoped). */
+function getBossBattle({ server = false, zoneId = null } = {}) {
+  const b = server ? bossBattles.server : (bossBattles.map && (!zoneId || bossBattles.map.zoneId === zoneId) ? bossBattles.map : null);
+  return b && b.state === "active" ? b : null;
+}
+
+/** A player joins an active boss fight (map: must be in the zone). */
+function joinBossBattle(player, battle) {
+  if (battle.state !== "active") return { ok: false, reason: "boss_gone" };
+  if (activeBattles.has(`player_${player.id}`)) return { ok: false, reason: "already_in_battle" };
+  if (battle.serverBoss && battle.players.length >= 12) return { ok: false, reason: "boss_full" };
+  battle.players.push(player);
+  activeBattles.set(`player_${player.id}`, battle);
+  require("./bossfight").initSanity(battle);
+  return { ok: true, battle };
 }
 
 function _log(battle, line) { battle.log.push(line); }
@@ -2436,6 +2883,11 @@ function _afterTurn(battle, player) {
     battle.round += 1;
   }
   if (battle.enemy.currentHp <= 0) return endBattle(battle, "victory");
+  // if the enemy turn already ended the battle (endBattle reset HP to 1),
+  // surface the cached outcome instead of re-checking _allDown
+  if (battle.state !== "active") {
+    return battle._lastOutcome ? { ...battle._lastOutcome } : { result: battle.state, battle };
+  }
   if (_allDown(battle)) return endBattle(battle, "defeat");
   return battle;
 }
@@ -2475,6 +2927,15 @@ function _useSkill(battle, player, ab, opts = {}) {
       applyStatus(enemy, ab.statusId, { potency: Math.max(1, Math.round(player.magAtk * 0.08)), duration: 3 });
       _log(battle, `☄️ ${enemy.name} is afflicted by **${ab.statusId.replace(/_/g, " ")}**!`);
     }
+    // area skills also cleave boss adds (life trees)
+    if (ab.area && battle.adds?.length) {
+      for (const add of battle.adds.filter(a => a.hp > 0)) {
+        const d = Math.max(1, Math.round(player.atk * 0.5));
+        add.hp = Math.max(0, add.hp - d);
+        _log(battle, `🌪️ The **${add.name}** takes **${d}** from the area attack.`);
+      }
+      battle.adds = battle.adds.filter(a => a.hp > 0);
+    }
   }
   // weapon skill bonuses
   if (ab.comboBonus) player.combo = (player.combo || 0) + ab.comboBonus;
@@ -2482,12 +2943,26 @@ function _useSkill(battle, player, ab, opts = {}) {
   return true;
 }
 
-function playerAction(battle, player, action, { skillId = null, itemName = null, stanceId = null, power = 100 } = {}) {
+function playerAction(battle, player, action, { skillId = null, itemName = null, stanceId = null, power = 100, target = null } = {}) {
   if (battle.state !== "active") return { ok: false, reason: "battle_over" };
   if (battle.players.length > 1 && battle.turn !== player.id) return { ok: false, reason: "not_your_turn" };
   const enemy = battle.enemy;
 
   if (action === "attack") {
+    // targeting a summonable add (Lichen's Life Trees, etc.)
+    const addTarget = (target === "add" || target === "tree") && (battle.adds || []).some(a => a.hp > 0);
+    if (addTarget) {
+      const add = battle.adds.find(a => a.hp > 0);
+      const dmg = Math.max(1, Math.round(player.atk * 0.9));
+      add.hp = Math.max(0, add.hp - dmg);
+      _log(battle, `🪓 **${player.name}** attacks the **${add.name}** for **${dmg}** (${add.hp}/${add.maxHp} HP).`);
+      if (add.hp <= 0) {
+        battle.adds = battle.adds.filter(a => a.hp > 0);
+        _log(battle, `🍂 The **${add.name}** withers — the boss loses its buff!`);
+      }
+      player.combo += 1;
+      return { ok: true, battle, ..._afterTurn(battle, player) };
+    }
     let powerMult = 1;
     // charged attack: consume stored charge
     if (battle.charging && battle.charging.playerId === player.id) {
@@ -2611,7 +3086,12 @@ function playerAction(battle, player, action, { skillId = null, itemName = null,
     player.guarding = true;
     applyStatus(player, "shield", { potency: Math.round(player.maxHp * 0.15), duration: 2 });
     applyStatus(player, "block_boost", { potency: 1, duration: 2 });
-    _log(battle, `🛡️ ${player.name} braces for impact (shield + perfect-block chance).`);
+    let sanityLine = "";
+    if (battle.boss?.mechanics?.sanity) {
+      const r = require("./bossfight").onPlayerGuard(battle, player);
+      if (r) sanityLine = `\n${r}`;
+    }
+    _log(battle, `🛡️ ${player.name} braces for impact (shield + perfect-block chance).${sanityLine}`);
     return { ok: true, battle, ..._afterTurn(battle, player) };
   }
 
@@ -2619,6 +3099,14 @@ function playerAction(battle, player, action, { skillId = null, itemName = null,
     const chanceToFlee = clamp(0.5 + (player.speed - enemy.speed) / 40, 0.2, 0.9);
     if (chance(chanceToFlee)) {
       _log(battle, `💨 ${player.name} flees from ${enemy.name}!`);
+      if (battle.isBoss) {
+        // boss fights: the boss stays; the fleeing player just leaves
+        battle.players = battle.players.filter(p => p.id !== player.id);
+        activeBattles.delete(`player_${player.id}`);
+        if (battle.turn === player.id) battle.turn = _alive(battle)[0]?.id || null;
+        if (!_alive(battle).length) return endBattle(battle, "fled");
+        return { ok: true, battle, result: "fled", memberLeft: true };
+      }
       if (battle.players.length > 1) {
         // party: this member leaves; the rest keep fighting
         battle.players = battle.players.filter(p => p.id !== player.id);
@@ -2656,6 +3144,11 @@ function _pickTarget(battle) {
 
 function enemyTurn(battle) {
   if (battle.state !== "active") return;
+  // boss fights use the dedicated boss engine (sanity, trees, strikes)
+  if (battle.boss) {
+    require("./bossfight").bossTurn(battle);
+    return;
+  }
   const enemy = battle.enemy;
   const player = _pickTarget(battle);
   if (!player) return;
@@ -2665,9 +3158,11 @@ function enemyTurn(battle) {
   if (enemy.currentHp <= 0) return;
   const skill = enemy.skills.filter(s => !(s.cd > 0)).sort(() => Math.random() - 0.5)[0];
   let usedSkill = false;
+  let lastHit = null;
   if (skill && chance(0.4)) {
     skill.cd = skill.cooldown;
     const hit = computeHit(enemy, player, { power: skill.power, element: skill.element, isMagical: true });
+    lastHit = hit;
     _log(battle, `${ELEMENT_EMOJI[skill.element] || ""} **${enemy.name}** uses **${skill.name}**!`);
     if (!hit.dodged) {
       if (player.guarding && chance(0.4)) {
@@ -2690,6 +3185,7 @@ function enemyTurn(battle) {
   }
   if (!usedSkill) {
     const hit = computeHit(enemy, player, { power: 1, element: "physical" });
+    lastHit = hit;
     if (!hit.dodged) {
       if (player.guarding && chance(0.4)) {
         _log(battle, `🛡️ **PERFECT BLOCK!** ${player.name} negates the attack entirely!`);
@@ -2708,8 +3204,8 @@ function enemyTurn(battle) {
     applyStatus(player, enemy.passiveProc.statusId, { potency: Math.max(1, Math.round(enemy.magAtk * 0.06)), duration: 2 });
     _log(battle, `🔮 ${enemy.name}'s **${enemy.passive?.name || "passive"}** afflicts ${player.name} with **${enemy.passiveProc.statusId.replace(/_/g, " ")}**!`);
   }
-  if (enemy.lifesteal > 0 && !usedSkill) {
-    const healed = Math.min(enemy.maxHp - enemy.currentHp, Math.round(hit.damage * enemy.lifesteal));
+  if (enemy.lifesteal > 0 && !usedSkill && lastHit) {
+    const healed = Math.min(enemy.maxHp - enemy.currentHp, Math.round(lastHit.damage * enemy.lifesteal));
     enemy.currentHp += healed;
   }
   if (_allDown(battle)) endBattle(battle, "defeat");
@@ -2725,6 +3221,10 @@ function _absorbShield(player, damage) {
 }
 
 function endBattle(battle, result) {
+  // idempotent: if already ended (e.g. enemyTurn ends it AND _afterTurn checks),
+  // return the cached outcome so penalties/rewards aren't double-applied
+  if (battle._ended && battle._lastOutcome) return { ...battle._lastOutcome };
+  battle._ended = true;
   battle.state = result;
   const playersArr = battle.players;
   const enemy = battle.enemy;
@@ -2732,7 +3232,12 @@ function endBattle(battle, result) {
 
   if (result === "victory") {
     enemy.currentHp = 0;
-    const xpGain = Math.max(1, Math.round(enemy.xpReward * battle.difficultyMult));
+    let xpGain = Math.max(1, Math.round(enemy.xpReward * battle.difficultyMult));
+    if (battle.xpBoost) {
+      xpGain = Math.floor(xpGain * battle.xpBoost);
+      outcome.xpBoosted = true;
+      battle.xpBoost = null;
+    }
     const goldPool = Math.max(1, Math.round(enemy.goldReward * battle.difficultyMult));
     const survivors = _alive(battle);
     const n = Math.max(1, survivors.length);
@@ -2773,6 +3278,25 @@ function endBattle(battle, result) {
     outcome.loot = loot.items;
     outcome.victory = true;
 
+    // BOSS FIGHTS: free corrupted players + summoner bonus
+    if (battle.isBoss) {
+      const freed = [];
+      for (const c of battle.corrupted || []) {
+        const p = require("./schema").players.get(c.playerId);
+        if (p) { p.hp = 1; p.mp = Math.round(p.maxMp * 0.5); p.statusEffects = []; freed.push(p.name); }
+      }
+      battle.corrupted = [];
+      if (freed.length) outcome.freedCorrupted = freed;
+      if (battle.summonerId) {
+        const sum = require("./schema").players.get(battle.summonerId);
+        if (sum) {
+          const bonus = Math.floor(goldPool * 0.5);
+          sum.gold += bonus;
+          outcome.summonerBonus = { name: sum.name, gold: bonus };
+        }
+      }
+    }
+
     // DUNGEON: continue to the next floor automatically
     if (battle.dungeon) {
       battle.dungeon.floor += 1;
@@ -2794,6 +3318,9 @@ function endBattle(battle, result) {
           p.hp = Math.min(p.maxHp, p.hp + Math.round(p.maxHp * 0.2)); // rest between floors
           p.mp = Math.min(p.maxMp, p.mp + Math.round(p.maxMp * 0.3));
         }
+        // SITUATION: a good/bad/neutral event hits the party before the next floor
+        const event = rollDungeonEvent(Math.ceil(battle.zoneId / 10));
+        const evRes = applyDungeonEvent(battle, event);
         const isBossFloor = battle.dungeon.floor >= battle.dungeon.bossFloor;
         const zone = require("../world/zones").getZone(battle.zoneId);
         const top = survivors.reduce((a, b) => (b.level > a.level ? b : a), survivors[0]);
@@ -2805,17 +3332,25 @@ function endBattle(battle, result) {
         battle.round = 1;
         battle.state = "active";
         battle.charging = null;
-        battle.log = [`🏰 **FLOOR ${battle.dungeon.floor}/${battle.dungeon.totalFloors}**${isBossFloor ? " — BOSS FLOOR!" : ""}\n\n${enemyIntro(nextEnemy)}`];
+        battle._ended = false;        // new floor = new life
+        battle._lastOutcome = null;
+        battle.log = [`🏰 **FLOOR ${battle.dungeon.floor}/${battle.dungeon.totalFloors}**${isBossFloor ? " — BOSS FLOOR!" : ""}\n\n${evRes.summary}\n\n${enemyIntro(nextEnemy)}`];
         outcome.dungeonFloor = battle.dungeon.floor;
         outcome.dungeonContinue = true;
         outcome.dungeonBossFloor = isBossFloor;
+        outcome.dungeonEvent = { name: event.name, type: event.type };
         // keep the battle registered; members keep attacking
+        battle._lastOutcome = outcome;
         return { ...outcome };
       }
     }
   } else if (result === "defeat") {
+    const levelLost = [];
     for (const player of playersArr) {
       player.deaths += 1;
+      // death penalty: lose a level + the stats that level granted
+      const dp = require("./progression").applyDeathPenalty(player);
+      if (dp.ok && dp.lostLevel) levelLost.push(player.name);
       const penalty = Math.floor(player.gold * 0.05);
       player.gold -= penalty;
       if (player.mode === "hardcore" || player.mode === "permadeath") {
@@ -2825,13 +3360,21 @@ function endBattle(battle, result) {
       player.hp = 1;
       player.statusEffects = [];
     }
+    outcome.levelLost = levelLost;
     outcome.goldPenalty = Math.floor(playersArr[0].gold * 0.05);
   } else if (result === "fled") {
     // nothing extra; some members may already have left
   }
 
+  // boss battles: clear the global slot
+  if (battle.isBoss) {
+    if (bossBattles.map === battle) bossBattles.map = null;
+    if (bossBattles.server === battle) bossBattles.server = null;
+  }
+
   activeBattles.delete(battle.id);
   for (const p of playersArr) activeBattles.delete(`player_${p.id}`);
+  battle._lastOutcome = outcome;
   return { ...outcome };
 }
 
@@ -2847,23 +3390,39 @@ function gainMastery(player, type, amt) { if (_gainMastery) _gainMastery(player,
 function battleStatusText(battle) {
   const enemy = battle.enemy;
   const alive = _alive(battle);
-  let s = `**Round ${battle.round}** — ${battle.state === "active" ? "⚔️ In combat" : `Over (${battle.state})`}${battle.dungeon ? ` | 🏰 Floor ${battle.dungeon.floor}/${battle.dungeon.totalFloors}` : ""}\n\n`;
-  s += `${enemyIntro(enemy)}\n\n`;
+  let s = "";
+  if (battle.isBoss) {
+    s = `**Round ${battle.round}** — ⚔️ **BOSS FIGHT**${battle.serverBoss ? " 🌍 SERVER BOSS" : " 🗺️ MAP BOSS"}\n\n`;
+    s += `${enemyIntro(enemy)}\n`;
+    if ((battle.adds || []).some(a => a.hp > 0)) {
+      s += `\n🌳 **Adds:** ${battle.adds.filter(a => a.hp > 0).map(a => `${a.name} (${a.hp}/${a.maxHp} HP) — \`attack tree\``).join(" | ")}\n`;
+    }
+    s += `\n`;
+  } else {
+    s = `**Round ${battle.round}** — ${battle.state === "active" ? "⚔️ In combat" : `Over (${battle.state})`}${battle.dungeon ? ` | 🏰 Floor ${battle.dungeon.floor}/${battle.dungeon.totalFloors}` : ""}\n\n`;
+    s += `${enemyIntro(enemy)}\n\n`;
+  }
   for (const p of alive) {
     const turn = battle.turn === p.id ? " 🎯" : "";
     const stance = STANCES[p.stance] || STANCES.balanced;
-    s += `**${p.name}**${turn} ❤️ ${p.hp}/${p.maxHp} 🔷 ${p.mp}/${p.maxMp} ⚡ ${p.stamina}/${p.maxStamina} ${stance.emoji} 🔗${p.combo || 0}\n`;
+    s += `**${p.name}**${turn} ❤️ ${p.hp}/${p.maxHp} 🔷 ${p.mp}/${p.maxMp} ⚡ ${p.stamina}/${p.maxStamina} ${stance.emoji} 🔗${p.combo || 0}`;
+    const san = battle.sanity?.[p.id];
+    if (san) s += ` 🧠 ${san.cur}/${san.max}`;
+    s += `\n`;
   }
   const down = battle.players.filter(p => p.hp <= 0);
   if (down.length) s += `💀 Down: ${down.map(p => p.name).join(", ")}\n`;
-  if (battle.players.length > 1) s += `\nTurn: **${battle.players.find(p => p.id === battle.turn)?.name || "—"}** (party of ${battle.players.length})`;
+  if (battle.corrupted?.length) s += `😈 Corrupted: ${battle.corrupted.map(c => c.name).join(", ")}\n`;
+  if (battle.players.length > 1) s += `\nTurn: **${battle.players.find(p => p.id === battle.turn)?.name || "—"}** (${battle.players.length} fighters)`;
   return s;
 }
 
 module.exports = {
   ABILITIES, ULTIMATES, STANCES, ITEM_EFFECTS, STARTER_ABILITIES,
   WEAPON_SKILLS, WEAPON_PASSIVES, weaponPassive, weaponSkillsFor, computeHit,
-  startEncounter, startPartyEncounter, getPlayerBattle, playerAction, enemyTurn, endBattle,
+  startEncounter, startPartyEncounter, startBossEncounter, getBossBattle,
+  joinBossBattle, bossBattles,
+  getPlayerBattle, playerAction, enemyTurn, endBattle,
   battleStatusText, bindProgressionHooks,
 };
 });
@@ -3539,6 +4098,31 @@ function setSkillLevel(player, kind, key, level) {
   return level;
 }
 
+// ============================================================
+// DEATH PENALTY — any death (battle, corruption, PvP) costs a level
+// and the stats that level granted. Only applies once per death.
+// ============================================================
+function applyDeathPenalty(player) {
+  if (!player) return { ok: false, reason: "no_player" };
+  if (player._deathPenalized) return { ok: false, reason: "already" };
+  player._deathPenalized = true;
+  const before = { level: player.level, atk: player.atk, maxHp: player.maxHp, maxMp: player.maxMp };
+  if (player.level > 1) {
+    player.level -= 1;
+    // clamp exp so the lost level can't be re-earned instantly
+    const need = require("./schema").xpForLevel(player.level);
+    if (player.exp >= need) player.exp = Math.max(0, need - 1);
+    refreshStats(player); // recomputes every stat from the new level
+  }
+  return {
+    ok: true,
+    level: player.level,
+    lostLevel: before.level > player.level,
+    before, after: { level: player.level, atk: player.atk, maxHp: player.maxHp, maxMp: player.maxMp },
+  };
+}
+function resetDeathFlag(player) { player._deathPenalized = false; }
+
 // wire combat rewards into progression
 const { bindProgressionHooks } = require("./combat");
 bindProgressionHooks({ gainPetXp, gainMastery });
@@ -3565,7 +4149,7 @@ module.exports = {
   getChallengeRank, getLegacyRank, getReputationRank, getFactionRank,
   getGuildLevel, getWeaponLevel, getSkillLevelFor, ranksText,
   skillXpNeeded, cumulativeSkillXp, getSkillLevel, gainSkillXp,
-  skillProgressText, setSkillLevel,
+  skillProgressText, setSkillLevel, applyDeathPenalty, resetDeathFlag,
 };
 });
 
@@ -3773,6 +4357,7 @@ function endDuel(battle, winner, opts = {}) {
   loser.gold = Math.max(0, loser.gold - battle.wager);
   winner.pvpWins = (winner.pvpWins || 0) + 1;
   loser.pvpLosses = (loser.pvpLosses || 0) + 1;
+  // NOTE: PvP losses intentionally do NOT trigger the death penalty (no level loss)
   battle.log.push(`🏆 **${winner.name} WINS THE DUEL!** (+${pot} gold)`);
   if (opts.forfeit) battle.log.push(`(${loser.name} forfeited.)`);
   const battleRef = battle;
@@ -4788,6 +5373,11 @@ const CORE_RECIPES = {
   torch_bundle: { id: "torch_bundle", name: "Torch Bundle", category: "misc", tier: 1, profession: "none", professionXp: 0, req: { "Oak Log": 2, "Pine Wood": 1 }, result: { name: "Torch Bundle", qty: 3, effect: { light: true } }, discoverable: true, flavor: "Darkness, solved." },
   backpack_large: { id: "backpack_large", name: "Large Backpack", category: "misc", tier: 4, profession: "tailoring", professionXp: 12, req: { "Leather": 6, "Spider Silk": 4 }, result: { name: "Large Backpack", qty: 1, statBonus: { inventorySize: 20 } }, discoverable: true, flavor: "Carries your life." },
   treasure_compass: { id: "treasure_compass", name: "Treasure Compass", category: "misc", tier: 5, profession: "enchanting", professionXp: 15, req: { "Gold": 200, "Arcane Dust": 4, "Mithril Ore": 2 }, result: { name: "Treasure Compass", qty: 1, effect: { treasure: true } }, discoverable: true, flavor: "Points at the shiny." },
+  summoning_stone: { id: "summoning_stone", name: "Summoning Stone", category: "misc", tier: 20, profession: "enchanting", professionXp: 25, req: { "Ectoplasm": 5, "Arcane Dust": 3, "Soul Shard": 1 }, result: { name: "Summoning Stone", qty: 1, effect: { summon: true } }, discoverable: true, flavor: "It hums with the call of something vast. Use it to summon a map boss: `playrpg summon`." },
+  // ---- SERVER BOSS KEYS (insane item costs) ----
+  titanic_horn: { id: "titanic_horn", name: "Titanic Horn of the Abyss", category: "misc", tier: 35, profession: "enchanting", professionXp: 60, req: { "Leviathan Scale": 40, "Abyss Eel": 25, "Pearl": 20, "Glowing Kelp": 30, "Soul Shard": 5 }, result: { name: "Titanic Horn of the Abyss", qty: 1, effect: { summon: "megalondon" } }, discoverable: true, flavor: "A horn carved from the depths. Blow it to summon Megalondon." },
+  worldseed: { id: "worldseed", name: "Worldseed of the Green God", category: "misc", tier: 35, profession: "enchanting", professionXp: 60, req: { "Ancient Wood": 40, "Venom Bloom": 30, "Moonpetal": 30, "Primal Root": 20, "Ectoplasm": 10 }, result: { name: "Worldseed of the Green God", qty: 1, effect: { summon: "lichen" } }, discoverable: true, flavor: "A seed that should never have grown. Plant it to summon Lichen." },
+  chronos_key: { id: "chronos_key", name: "Chronos Key", category: "misc", tier: 35, profession: "enchanting", professionXp: 60, req: { "Soul Shard": 30, "Ectoplasm": 25, "Elemental Core": 15, "Arcane Dust": 50, "Diamond": 5 }, result: { name: "Chronos Key", qty: 1, effect: { summon: "chronos" } }, discoverable: true, flavor: "A key that doesn't fit any door. Turn it to summon Chronos." },
   // enchanting materials
   arcane_dust: { id: "arcane_dust", name: "Arcane Dust", category: "enchant", tier: 2, profession: "enchanting", professionXp: 5, req: { "Glowing Slime": 2, "Moonpetal": 1 }, result: { name: "Arcane Dust", qty: 2 }, discoverable: true, flavor: "Ground-up magic." },
   essence_of_fire: { id: "essence_of_fire", name: "Essence of Fire", category: "enchant", tier: 3, profession: "enchanting", professionXp: 8, req: { "Cinder": 3, "Arcane Dust": 1 }, result: { name: "Essence of Fire", qty: 1 }, discoverable: true, flavor: "Bottled warmth." },
@@ -5370,6 +5960,416 @@ module.exports = {
 };
 });
 
+// ---------------------- embedded module: src/world/bossdefs ----------------------
+__def("src/world/bossdefs", function (module, exports, require) {
+// ============================================================
+// bossdefs.js — MAP BOSSES (per-zone, summonable) and SERVER
+// BOSSES (Megalondon, Lichen, Chronos) with insane scaled stats
+// and 5-12 skills each. Pure Node.
+// ============================================================
+
+const { pick, randInt, seededRng, cap, seedName } = require("../util");
+const { ELEMENTS, ELEMENT_EMOJI } = require("../config");
+
+function _lvlFactor(level) { return 1 + (level - 1) * 0.18; }
+
+// ============================================================
+// MAP BOSS SKILLS (pool of 10; every map boss gets 5-6 with
+// at least 1 AoE and 1 piercing)
+// ============================================================
+const MAP_BOSS_SKILLS = [
+  { id: "mb_slam",        name: "Seismic Slam",      power: 1.8, element: "earth",     kind: "damage", aoe: false, piercing: 0.3, statusId: "stun",     statusChance: 0.35, cooldown: 4, emoji: "🌋" },
+  { id: "mb_roar",        name: "Dread Roar",        power: 1.5, element: "shadow",    kind: "damage", aoe: true,  piercing: 0,   statusId: "fear",     statusChance: 0.3,  cooldown: 4, emoji: "👹" },
+  { id: "mb_pierce",      name: "Impaling Charge",   power: 2.2, element: "physical",  kind: "damage", aoe: false, piercing: 0.6, statusId: "bleed",    statusChance: 0.5,  cooldown: 3, emoji: "🔱" },
+  { id: "mb_flame",       name: "Inferno Breath",    power: 2.0, element: "fire",      kind: "damage", aoe: true,  piercing: 0,   statusId: "burn",     statusChance: 0.5,  cooldown: 3, emoji: "🔥" },
+  { id: "mb_volley",      name: "Piercing Volley",   power: 1.6, element: "physical",  kind: "damage", aoe: true,  piercing: 0.4, statusId: null,       statusChance: 0,    cooldown: 3, emoji: "🎯" },
+  { id: "mb_curse",       name: "Hex of Ruin",       power: 1.2, element: "shadow",    kind: "damage", aoe: true,  piercing: 0,   statusId: "curse",    statusChance: 0.5,  cooldown: 4, emoji: "🌑" },
+  { id: "mb_frost",       name: "Glacial Wave",      power: 1.7, element: "ice",       kind: "damage", aoe: true,  piercing: 0,   statusId: "freeze",   statusChance: 0.4,  cooldown: 4, emoji: "❄️" },
+  { id: "mb_thunder",     name: "Stormfall",         power: 1.9, element: "lightning", kind: "damage", aoe: false, piercing: 0.2, statusId: "shock",    statusChance: 0.5,  cooldown: 3, emoji: "⚡" },
+  { id: "mb_wrath",       name: "Wrath of the Wild", power: 2.4, element: "earth",     kind: "damage", aoe: true,  piercing: 0.2, statusId: "armor_break", statusChance: 0.6, cooldown: 5, emoji: "💥" },
+  { id: "mb_drain",       name: "Soul Drain",        power: 1.4, element: "shadow",    kind: "damage", aoe: false, piercing: 0.4, statusId: "weaken",   statusChance: 0.5,  cooldown: 3, emoji: "🩸" },
+  { id: "mb_claw",        name: "Rending Claw",      power: 1.3, element: "physical",  kind: "damage", aoe: false, piercing: 0,   statusId: "bleed",    statusChance: 0.6,  cooldown: 2, emoji: "🦞" },
+  { id: "mb_gaze",        name: "Petrifying Gaze",   power: 1.2, element: "arcane",    kind: "damage", aoe: false, piercing: 0,   statusId: "slow",     statusChance: 0.6,  cooldown: 3, emoji: "👁️" },
+  { id: "mb_bite",        name: "Maw of the Beast",  power: 1.5, element: "physical",  kind: "damage", aoe: false, piercing: 0,   statusId: "fear",     statusChance: 0.3,  cooldown: 3, emoji: "🦷" },
+];
+
+const MAP_BOSS_TITLES = ["the World Eater", "the Deep Horror", "the Unbroken", "the Ancient One", "the Storm Tyrant", "the Devourer", "the Silent King", "the Starving God"];
+
+/** Create a MAP boss for a zone: insane stats vs map enemies, 5-6 skills. */
+function createMapBoss(zone, summonerLevel) {
+  const tier = zone.tier;
+  const level = Math.max(1, summonerLevel || zone.recommendedLevel || 1);
+  const lf = _lvlFactor(level);
+  const hp = Math.round(40 * (30 + tier * 2.5) * lf);
+  const rng = seededRng("mboss_" + zone.id);
+  // skills: 5-6 with guaranteed 1 aoe + 1 piercing
+  const aoe = MAP_BOSS_SKILLS.filter(s => s.aoe);
+  const pierce = MAP_BOSS_SKILLS.filter(s => s.piercing > 0);
+  const rest = MAP_BOSS_SKILLS.filter(s => !s.aoe && s.piercing === 0);
+  const picks = [aoe[Math.floor(rng() * aoe.length)], pierce[Math.floor(rng() * pierce.length)]];
+  const shuffled = [...rest].sort(() => rng() - 0.5);
+  const count = 3 + Math.floor(rng() * 2); // 3-4 more
+  for (let i = 0; i < count && shuffled.length; i++) picks.push(shuffled.pop());
+  const name = seedName("mbossname_" + zone.id);
+  return {
+    id: `mapboss_${zone.id}`,
+    templateId: `mapboss_${zone.id}`,
+    name,
+    title: MAP_BOSS_TITLES[Math.floor(rng() * MAP_BOSS_TITLES.length)],
+    family: "mapboss",
+    tier,
+    zoneId: zone.id,
+    level,
+    hp, maxHp: hp, currentHp: hp,
+    atk: Math.round(8 * (2.2 + tier * 0.05) * lf),
+    def: Math.round(3 * (1.8 + tier * 0.04) * lf),
+    magAtk: Math.round(6 * (2.0 + tier * 0.05) * lf),
+    magDef: Math.round(3 * (1.5 + tier * 0.03) * lf),
+    speed: 14 + tier,
+    critChance: 0.1,
+    dodge: 0.06,
+    resistances: Object.fromEntries(ELEMENTS.map(el => [el, tier >= 40 ? 0.25 : 0.1])),
+    elements: ["physical", "arcane"],
+    skills: picks.map(s => ({ ...s, cd: 0 })),
+    elite: false, boss: true, isMapBoss: true,
+    faction: "boss",
+    xpReward: Math.round(300 * lf * (1 + tier * 0.1)),
+    goldReward: Math.round(200 * lf * (1 + tier * 0.15)),
+    introText: `The ground trembles. **${name}** rises — ${MAP_BOSS_TITLES[Math.floor(rng() * MAP_BOSS_TITLES.length)]} of ${zone.name}!`,
+    mechanics: {},
+    statusEffects: [],
+  };
+}
+
+// ============================================================
+// SERVER BOSS SKILLS
+// ============================================================
+const SK = (id, name, power, element, opts = {}) => ({
+  id, name, power, element, kind: "damage", aoe: false, piercing: 0, sanityDmg: 0,
+  statusId: null, statusChance: 0, cooldown: 3, emoji: "💥", ...opts,
+});
+
+const MEGALONDON_SKILLS = [
+  SK("meg_tidal",   "Tidal Wave",        1.6, "water",     { aoe: true, emoji: "🌊" }),
+  SK("meg_grip",    "Kraken Grip",       2.0, "water",     { statusId: "root", statusChance: 0.5, cooldown: 4, emoji: "🦑" }),
+  SK("meg_cannon",  "Brine Cannon",      1.8, "water",     { aoe: true, piercing: 0.5, cooldown: 4, emoji: "💦" }),
+  SK("meg_pressure","Deep Pressure",     1.4, "earth",     { aoe: true, statusId: "weaken", statusChance: 0.5, emoji: "🌀" }),
+  SK("meg_charge",  "Leviathan Charge",  2.4, "physical",  { piercing: 0.6, cooldown: 4, emoji: "🐋" }),
+  SK("meg_silence", "Drowning Dark",     1.2, "shadow",    { aoe: true, statusId: "silence", statusChance: 0.4, emoji: "🌑" }),
+  SK("meg_storm",   "Sea Storm",         2.0, "lightning", { aoe: true, statusId: "shock", statusChance: 0.4, emoji: "⛈️" }),
+  SK("meg_roar",    "Abyssal Roar",      1.5, "shadow",    { aoe: true, statusId: "fear", statusChance: 0.35, emoji: "👁️" }),
+  SK("meg_decree",  "Emperor's Decree",  2.2, "water",     { aoe: true, piercing: 0.3, cooldown: 5, emoji: "👑" }),
+  SK("meg_depths",  "Eternal Depths",    2.6, "shadow",    { aoe: true, piercing: 0.2, cooldown: 6, emoji: "🕳️" }),
+];
+
+const LICHEN_SKILLS = [
+  SK("lic_over",     "Overgrowth",        1.4, "earth",   { aoe: true, statusId: "root", statusChance: 0.5, emoji: "🌿" }),
+  SK("lic_spore",    "Spore Burst",       1.3, "poison",  { aoe: true, statusId: "poison", statusChance: 0.6, emoji: "🍄" }),
+  SK("lic_vine",     "Vine Whip",         1.6, "earth",   { statusId: "slow", statusChance: 0.6, emoji: "🪢" }),
+  SK("lic_tree",     "Life Tree",         0,    "earth",  { kind: "special", special: "spawnTree", emoji: "🌳" }),
+  SK("lic_bless",    "Forest Blessing",   0,    "nature", { kind: "special", special: "healBoss", cooldown: 5, emoji: "🍃" }),
+  SK("lic_thorn",    "Thorn Barrage",     1.5, "poison",  { aoe: true, piercing: 0.4, cooldown: 3, emoji: "🌵" }),
+  SK("lic_photo",    "Photosynthesis",    0,    "nature", { kind: "special", special: "healTrees", cooldown: 4, emoji: "☀️" }),
+  SK("lic_roots",    "Ancient Roots",     1.5, "earth",   { aoe: true, statusId: "stun", statusChance: 0.35, cooldown: 4, emoji: "🪨" }),
+  SK("lic_pollen",   "Pollen Haze",       1.1, "wind",    { aoe: true, statusId: "confuse", statusChance: 0.4, emoji: "🌸" }),
+  SK("lic_wrath",    "Nature's Wrath",    2.0, "earth",   { aoe: true, piercing: 0.3, cooldown: 4, emoji: "🌪️" }),
+  SK("lic_world",    "World Tree",        0,    "nature", { kind: "special", special: "spawnTree2", cooldown: 7, emoji: "🌳" }),
+];
+
+const CHRONOS_SKILLS = [
+  SK("chr_slip",     "Time Slip",          1.0, "arcane", { sanityDmg: 0.15, emoji: "⏳" }),
+  SK("chr_fracture", "Temporal Fracture",  0.9, "arcane", { aoe: true, sanityDmg: 0.12, emoji: "💠" }),
+  SK("chr_paradox",  "Paradox Bolt",       1.2, "arcane", { sanityDmg: 0.2, piercing: 0.2, cooldown: 3, emoji: "🔀" }),
+  SK("chr_age",      "Age Acceleration",   0.8, "arcane", { aoe: true, sanityDmg: 0.1, statusId: "slow", statusChance: 0.6, emoji: "🕰️" }),
+  SK("chr_frozen",   "Frozen Moment",      1.0, "ice",    { sanityDmg: 0.15, statusId: "freeze", statusChance: 0.5, emoji: "🧊" }),
+  SK("chr_entropy",  "Entropy Burst",      1.1, "shadow", { aoe: true, sanityDmg: 0.18, cooldown: 3, emoji: "🌫️" }),
+  SK("chr_collapse", "Timeline Collapse",  1.3, "arcane", { aoe: true, sanityDmg: 0.25, cooldown: 5, emoji: "💫" }),
+  SK("chr_loop",     "Paradox Loop",       1.1, "arcane", { sanityDmg: 0.22, statusId: "confuse", statusChance: 0.5, emoji: "🔁" }),
+  SK("chr_decay",    "Temporal Decay",     0.9, "arcane", { aoe: true, sanityDmg: 0.12, piercing: 0.3, emoji: "🦴" }),
+  SK("chr_stutter",  "Time Stutter",       0.7, "arcane", { aoe: true, sanityDmg: 0.08, statusId: "stun", statusChance: 0.3, emoji: "🫀" }),
+  SK("chr_last",     "The Last Second",    0,    "arcane", { kind: "special", special: "healSelf", cooldown: 6, emoji: "⏱️" }),
+];
+
+// ============================================================
+// SERVER BOSS DEFINITIONS
+// ============================================================
+const SERVER_BOSSES = {
+  megalondon: {
+    id: "megalondon", key: "megalondon",
+    name: "Megalondon", title: "Emperor of the Sea",
+    emoji: "🐙", element: "water",
+    desc: "80% of its skills hit ALL fighting players.",
+    statMult: { hp: 220, atk: 10, def: 8, magAtk: 12, magDef: 8, speed: 9 },
+    skills: MEGALONDON_SKILLS,
+    mechanics: { aoeHeavy: true },
+    colors: { primary: 0x1abc9c },
+  },
+  lichen: {
+    id: "lichen", key: "lichen",
+    name: "Lichen", title: "God of Nature",
+    emoji: "🌳", element: "earth",
+    desc: "Spawns Life Trees that buff its stats and heal it. Hits hard.",
+    statMult: { hp: 250, atk: 14, def: 12, magAtk: 10, magDef: 11, speed: 8 },
+    skills: LICHEN_SKILLS,
+    mechanics: { lifeTrees: true },
+  },
+  chronos: {
+    id: "chronos", key: "chronos",
+    name: "Chronos", title: "Guardian of Time",
+    emoji: "⏳", element: "arcane",
+    desc: "Sanity mechanics: 0 sanity = instant corruption into its ally. Can multi-strike. Lowest damage.",
+    statMult: { hp: 200, atk: 6, def: 10, magAtk: 6, magDef: 14, speed: 12 },
+    skills: CHRONOS_SKILLS,
+    mechanics: { sanity: true, strikes: true },
+  },
+};
+
+/** Create a SERVER boss at the summoner's level. Stats are insane. */
+function createServerBoss(bossId, level) {
+  const def = SERVER_BOSSES[bossId];
+  if (!def) return null;
+  const lv = Math.max(10, level || 10);
+  const lf = _lvlFactor(lv);
+  const m = def.statMult;
+  const hp = Math.round(40 * m.hp * lf);
+  return {
+    id: `server_${bossId}`,
+    templateId: `server_${bossId}`,
+    name: def.name,
+    title: def.title,
+    emoji: def.emoji,
+    family: def.id,
+    tier: Math.max(1, Math.ceil(lv / 10)),
+    level: lv,
+    hp, maxHp: hp, currentHp: hp,
+    atk: Math.round(8 * m.atk * lf),
+    def: Math.round(3 * m.def * lf),
+    magAtk: Math.round(6 * m.magAtk * lf),
+    magDef: Math.round(3 * m.magDef * lf),
+    speed: Math.round(m.speed * 1.5),
+    critChance: 0.1,
+    dodge: 0.08,
+    resistances: Object.fromEntries(ELEMENTS.map(el => [el, 0.2])),
+    elements: [def.element, "arcane"],
+    skills: def.skills.map(s => ({ ...s, cd: 0 })),
+    elite: false, boss: true, isServerBoss: true, bossKey: def.id,
+    faction: "server_boss",
+    xpReward: Math.round(1200 * lf),
+    goldReward: Math.round(1500 * lf),
+    introText: `🌍 **${def.name}, ${def.title}** has awoken! Every adventurer in the server can join the fight!`,
+    mechanics: def.mechanics,
+    statusEffects: [],
+  };
+}
+
+/** Sanity pool for a player vs Chronos: 200% HP + 1000% magic def. */
+function sanityMax(player) {
+  return Math.round(player.maxHp * 2 + player.magDef * 10);
+}
+
+module.exports = {
+  MAP_BOSS_SKILLS, MAP_BOSS_TITLES, createMapBoss,
+  SERVER_BOSSES, MEGALONDON_SKILLS, LICHEN_SKILLS, CHRONOS_SKILLS,
+  createServerBoss, sanityMax,
+};
+});
+
+// ---------------------- embedded module: src/world/dungeonevents ----------------------
+__def("src/world/dungeonevents", function (module, exports, require) {
+// ============================================================
+// dungeonevents.js — dungeon SITUATIONS between floors.
+// Good, bad, and neutral events (treasure, shrines, blessings,
+// traps, curses, ambushes, mimics...) that hit the whole party.
+// Pure Node.
+// ============================================================
+
+const { randInt, chance, weightedPick } = require("../util");
+const { applyStatus } = require("../core/statusEffects");
+const { rollLoot } = require("./loot");
+const { addItemObject } = require("../core/schema");
+
+function _dmg(maxHp, tier, pct) {
+  return Math.max(1, Math.round(maxHp * (pct + tier * 0.002)));
+}
+
+// ---- event table: apply(battle, players, tier) -> {summary, log} ----
+const EVENTS = {
+  // ===== GOOD =====
+  treasure_hoard: {
+    id: "treasure_hoard", name: "Treasure Hoard", type: "good", weight: 6,
+    desc: "A glittering pile of gold left by a fallen caravan.",
+    apply(battle, players, tier) {
+      const gold = 20 + tier * 8;
+      for (const p of players) p.gold += gold;
+      return { summary: `💰 **Treasure Hoard!** +${gold} gold each.` };
+    },
+  },
+  healing_shrine: {
+    id: "healing_shrine", name: "Healing Shrine", type: "good", weight: 5,
+    desc: "A glowing shrine restores the party.",
+    apply(battle, players) {
+      for (const p of players) { p.hp = p.maxHp; p.mp = p.maxMp; p.stamina = p.maxStamina; }
+      return { summary: `💚 **Healing Shrine!** The party is fully restored.` };
+    },
+  },
+  battle_blessing: {
+    id: "battle_blessing", name: "Ancient Blessing", type: "good", weight: 5,
+    desc: "Wards empower your attacks and defenses.",
+    apply(battle, players) {
+      for (const p of players) {
+        applyStatus(p, "attack_aura", { potency: 1, duration: 3 });
+        applyStatus(p, "defense_aura", { potency: 1, duration: 3 });
+      }
+      return { summary: `✨ **Ancient Blessing!** +ATK and +DEF auras for the next 3 turns.` };
+    },
+  },
+  gem_vein: {
+    id: "gem_vein", name: "Gem Vein", type: "good", weight: 4,
+    desc: "A sparkling vein of gems cracks open.",
+    apply(battle, players, tier) {
+      const gems = randInt(1, 2 + Math.floor(tier / 20));
+      for (const p of players) { p.currencies = p.currencies || {}; p.currencies.gems = (p.currencies.gems || 0) + gems; }
+      return { summary: `💎 **Gem Vein!** +${gems} gems each.` };
+    },
+  },
+  wandering_merchant: {
+    id: "wandering_merchant", name: "Wandering Merchant", type: "good", weight: 3,
+    desc: "A ghostly merchant offers wares from another age.",
+    apply(battle, players, tier) {
+      const lines = [];
+      for (const p of players) {
+        const loot = rollLoot({ tier: Math.max(1, tier), level: p.level, playerLevel: p.level });
+        const item = loot.items[0];
+        if (item) { addItemObject(p, item); lines.push(`• ${p.name} receives **${item.name}** [${item.rarityName}]`); }
+      }
+      return { summary: `🧭 **Wandering Merchant!**\n${lines.join("\n")}` };
+    },
+  },
+  war_camp: {
+    id: "war_camp", name: "Abandoned War Camp", type: "good", weight: 4,
+    desc: "Supplies and war-banners boost morale.",
+    apply(battle, players) {
+      battle.xpBoost = 1.5;
+      return { summary: `⚔️ **War Camp!** The next victory grants **+50% XP**.` };
+    },
+  },
+
+  // ===== BAD =====
+  poison_trap: {
+    id: "poison_trap", name: "Poison Trap", type: "bad", weight: 6,
+    desc: "A hidden needle trap sprays venom.",
+    apply(battle, players, tier) {
+      for (const p of players) {
+        const d = _dmg(p.maxHp, tier, 0.12);
+        p.hp = Math.max(1, p.hp - d);
+        applyStatus(p, "poison", { potency: 3 + Math.floor(tier / 20), duration: 2 });
+      }
+      return { summary: `☠️ **Poison Trap!** The party takes damage and is poisoned.` };
+    },
+  },
+  ancient_curse: {
+    id: "ancient_curse", name: "Ancient Curse", type: "bad", weight: 5,
+    desc: "Inky runes flare with malevolent power.",
+    apply(battle, players) {
+      for (const p of players) {
+        applyStatus(p, "weaken", { potency: 1, duration: 3 });
+        applyStatus(p, "curse", { potency: 1, duration: 3 });
+      }
+      return { summary: `🌑 **Ancient Curse!** The party is weakened and cursed for 3 turns.` };
+    },
+  },
+  ambush: {
+    id: "ambush", name: "Ambush!", type: "bad", weight: 5,
+    desc: "Traps spring as you enter the next chamber.",
+    apply(battle, players, tier) {
+      for (const p of players) {
+        const d = _dmg(p.maxHp, tier, 0.08);
+        p.hp = Math.max(1, p.hp - d);
+        applyStatus(p, "bleed", { potency: 3 + Math.floor(tier / 25), duration: 2 });
+      }
+      return { summary: `🗡️ **Ambush!** Traps tear into the party (bleeding).` };
+    },
+  },
+  collapsing_ceiling: {
+    id: "collapsing_ceiling", name: "Collapsing Ceiling", type: "bad", weight: 4,
+    desc: "The tunnel groans and stones rain down.",
+    apply(battle, players, tier) {
+      for (const p of players) {
+        const d = _dmg(p.maxHp, tier, 0.15);
+        p.hp = Math.max(1, p.hp - d);
+      }
+      return { summary: `🪨 **Collapsing Ceiling!** The party takes heavy damage.` };
+    },
+  },
+  cursed_water: {
+    id: "cursed_water", name: "Cursed Water", type: "bad", weight: 4,
+    desc: "You must wade through ichor that saps magic.",
+    apply(battle, players) {
+      for (const p of players) {
+        p.mp = Math.max(0, p.mp - Math.round(p.maxMp * 0.3));
+        applyStatus(p, "slow", { potency: 1, duration: 2 });
+      }
+      return { summary: `💧 **Cursed Water!** The party loses 30% MP and is slowed.` };
+    },
+  },
+  mimic_chest: {
+    id: "mimic_chest", name: "Mimic Chest", type: "bad", weight: 4,
+    desc: "The chest was waiting. It was always waiting.",
+    apply(battle, players, tier) {
+      for (const p of players) {
+        const d = _dmg(p.maxHp, tier, 0.05);
+        p.hp = Math.max(1, p.hp - d);
+        const lost = Math.floor(p.gold * 0.05);
+        p.gold = Math.max(0, p.gold - lost);
+      }
+      return { summary: `🎭 **Mimic Chest!** It bites — the party loses 5% gold.` };
+    },
+  },
+
+  // ===== NEUTRAL =====
+  echoes: {
+    id: "echoes", name: "Echoes of the Fallen", type: "neutral", weight: 4,
+    desc: "Whispers of past adventurers guide your steps.",
+    apply(battle, players, tier) {
+      for (const p of players) p.exp += 15 + tier * 5;
+      return { summary: `👻 **Echoes of the Fallen!** The party gains bonus XP.` };
+    },
+  },
+  mysterious_altar: {
+    id: "mysterious_altar", name: "Mysterious Altar", type: "neutral", weight: 3,
+    desc: "The altar grants a boon... or takes one.",
+    apply(battle, players, tier) {
+      const pool = ["treasure_hoard", "healing_shrine", "war_camp", "poison_trap", "ancient_curse", "mimic_chest"];
+      const sub = EVENTS[pool[randInt(0, pool.length - 1)]];
+      const res = sub.apply(battle, players, tier);
+      return { summary: `🔮 **Mysterious Altar!** ${res.summary.replace(/^\S+\s/, "")}` };
+    },
+  },
+};
+
+function rollDungeonEvent(tier = 1) {
+  const entries = Object.values(EVENTS).map(e => ({ item: e, weight: e.weight }));
+  const ev = weightedPick(entries);
+  return { ...ev, tier };
+}
+
+/** Apply an event to the whole party; returns {summary, log}. */
+function applyDungeonEvent(battle, ev) {
+  const players = battle.players.filter(p => p.hp > 0);
+  if (!players.length) return { summary: "The dungeon is silent.", log: [] };
+  const tier = ev.tier || Math.ceil((battle.zoneId || 1) / 10);
+  const res = ev.apply(battle, players, tier);
+  return { summary: res.summary, log: [res.summary] };
+}
+
+function eventInfo(id) {
+  const e = EVENTS[id];
+  return e ? { name: e.name, type: e.type, desc: e.desc } : null;
+}
+
+module.exports = { EVENTS, rollDungeonEvent, applyDungeonEvent, eventInfo };
+});
+
 // ---------------------- embedded module: src/world/enemies ----------------------
 __def("src/world/enemies", function (module, exports, require) {
 // ============================================================
@@ -5656,7 +6656,7 @@ function enemySummary(e) {
 
 function enemyIntro(e) {
   let s = `${e.introText}\n\n**${e.name}** — Lv ${e.level}\n`;
-  if (e.eliteModifiers.length) s += `Modifiers: ${e.eliteModifiers.map(m => ELITE_MODIFIERS.find(x => x.id === m)?.name).join(", ")}\n`;
+  if ((e.eliteModifiers || []).length) s += `Modifiers: ${e.eliteModifiers.map(m => ELITE_MODIFIERS.find(x => x.id === m)?.name).join(", ")}\n`;
   if (e.passive) s += `🔮 Passive: **${e.passive.name}** — ${e.passive.desc}\n`;
   if (e.skills?.length) s += `⚡ Skills: ${e.skills.map(s => s.name).join(", ")}\n`;
   s += `Elements: ${e.elements.map(el => ELEMENT_EMOJI[el] || "").join(" ")}\n`;
@@ -7260,6 +8260,42 @@ async function generateAIEnemy(zoneId, playerLevel) {
   return null;
 }
 
+/** AI-generated dungeon situation (good/bad/neutral) for the floor intro. */
+async function generateDungeonSituation(zone, floor, tone) {
+  if (!openai) return null;
+  try {
+    const response = await openai.chat.completions.create({
+      model: process.env.GROQ_MODEL || "openai/gpt-oss-20b",
+      temperature: 0.9,
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "dungeon_situation",
+          schema: {
+            type: "object",
+            properties: {
+              title: { type: "string" },
+              description: { type: "string" },
+              tone: { type: "string", enum: ["good", "bad", "neutral"] },
+            },
+            required: ["title", "description", "tone"],
+            additionalProperties: false,
+          },
+        },
+      },
+      messages: [
+        { role: "system", content: `You write short dramatic RPG dungeon situations. Generate ONE situation for floor ${floor} of a dungeon in ${zone.name} (world tier ${zone.tier}). Tone: ${tone || "either good or bad"} — good = treasure/shrine/blessing, bad = trap/curse/ambush. One to two sentences. No game mechanics, just vivid description.` },
+        { role: "user", content: `Situation for floor ${floor}` },
+      ],
+    });
+    const data = JSON.parse(response.choices[0]?.message?.content || "{}");
+    if (data.title && data.description) return data;
+  } catch (err) {
+    console.error("AI dungeon situation failed (falling back to procedural):", err.message);
+  }
+  return null;
+}
+
 client.on("ready", () => {
   console.log(`🤖 PlayRPG v2 engine active as ${client.user.tag}`);
   const hadSave = loadAll();
@@ -7309,6 +8345,7 @@ client.on("messageCreate", async (message) => {
 
   // Route
   let reply = runCommand(message, args, player);
+  if (reply && typeof reply.then === "function") reply = await reply; // async handlers (AI calls)
   if (reply === null) {
     reply = `❌ Unknown command \`${args[0]}\`. Try \`playrpg help\`.`;
   }
@@ -7346,6 +8383,35 @@ require("./src/commands/world").explore = async function (message, args, player)
   if (res.battle.enemy.elite) s += `💀 This is an **elite** — higher rewards, higher risk!\n`;
   s += `\nActions: \`playrpg attack\` | \`playrpg skill <name>\` | \`playrpg item <name>\` | \`playrpg guard\` | \`playrpg flee\``;
   return s;
+};
+
+// Intercept dungeon starts to add an AI-generated situation (good/bad) when Groq is set
+const originalDungeon = require("./src/commands/world").dungeon;
+require("./src/commands/world").dungeon = async function (message, args, player) {
+  const text = originalDungeon(message, args, player);
+  if (typeof text !== "string" || !text.includes("DUNGEON")) return text;
+  const battle = require("./src/core/combat").getPlayerBattle(player.id);
+  if (!battle?.dungeon) return text;
+  const ai = await generateDungeonSituation(getZone(player.zone), battle.dungeon.floor, null);
+  if (ai) {
+    const emoji = ai.tone === "good" ? "✨" : ai.tone === "bad" ? "⚠️" : "🔮";
+    return `${text}\n\n${emoji} **${ai.title}** — ${ai.description}`;
+  }
+  return text;
+};
+
+const originalParty = require("./src/commands/social").party;
+require("./src/commands/social").party = async function (message, args, player) {
+  const text = originalParty(message, args, player);
+  if (typeof text !== "string" || !text.includes("PARTY DUNGEON")) return text;
+  const battle = require("./src/core/combat").getPlayerBattle(player.id);
+  if (!battle?.dungeon) return text;
+  const ai = await generateDungeonSituation(getZone(player.zone), 1, null);
+  if (ai) {
+    const emoji = ai.tone === "good" ? "✨" : ai.tone === "bad" ? "⚠️" : "🔮";
+    return `${text}\n\n${emoji} **${ai.title}** — ${ai.description}`;
+  }
+  return text;
 };
 
 const token = process.env.DISCORD_TOKEN;
