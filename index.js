@@ -265,7 +265,8 @@ const handlers = {
       return `🌍 **${boss.name}, ${boss.title}** has been summoned by **${player.name}** (Lv ${boss.level}) — the **${keyItem}** crumbles to dust!\n\n${boss.introText}\n\n` +
         `👥 **EVERYONE IN THE SERVER** can join: \`playrpg boss join server\`\n` +
         `Mechanics: ${b.desc}\n` +
-        `Fight: \`playrpg attack\` | \`skill <id>\` | \`item <name>\` | \`guard\` | \`battle\`\n` +
+        `Fight: \`playrpg attack <Name>\` | \`skill <id> <Name>\` | \`item <name>\` | \`guard\` | \`battle\`\n` +
+        `🎯 2+ targets? Name one: \`attack Chronos\`, \`attack Life Tree\`, \`attack Corrupted <name>\`\n` +
         (boss.mechanics.lifeTrees ? `When Life Trees appear, focus them: \`playrpg attack Life Tree\`\n` : "") +
         (boss.mechanics.sanity ? `🧠 Watch your **sanity** — at 0 you become Chronos's ally (and lose a level)! Guard to recover some. Allies can free you by targeting the corruption: \`playrpg attack Corrupted <name>\`.\n` : "");
     }
@@ -286,7 +287,8 @@ const handlers = {
     return `🗺️ **MAP BOSS SUMMONED in ${zone.name}!**\n\n${boss.introText}\n` +
       `⚠️ Lv ${boss.level} | HP ${boss.maxHp} | Skills: ${boss.skills.map(s => s.name).join(", ")}\n\n` +
       `**Other players can only join after traveling here** (\`playrpg travel ${player.zone}\`) — then: \`playrpg boss join\`\n` +
-      `Fight: \`playrpg attack\` | \`skill <id>\` | \`item <name>\` | \`guard\``;
+      `Fight: \`playrpg attack <Name>\` | \`skill <id> <Name>\` | \`item <name>\` | \`guard\` | \`battle\`\n` +
+      `🎯 2+ targets? Name one: \`playrpg attack <Name>\``;
   },
 
   boss(message, args, player) {
@@ -1471,13 +1473,14 @@ const handlers = {
       `\`playrpg zone\` — zone details | \`playrpg explore\` — start a battle\n` +
       `\`playrpg dungeon\` — enter the zone dungeon\n\n` +
       `**Combat**\n` +
-      `\`playrpg attack\` | \`playrpg skill <id>\` | \`playrpg item <name>\` | \`playrpg guard\` | \`playrpg flee\` | \`playrpg battle\`\n` +
-      `\`playrpg charge [pct]\` — charged attacks | \`playrpg combo\` — spend combo | \`playrpg ultimate\` — class ultimate (Lv 50) | \`playrpg stance <id>\` — combat stances\n\n` +
+      `\`playrpg attack <Name>\` | \`playrpg skill <id> <Name>\` | \`playrpg item <name>\` | \`playrpg guard\` | \`playrpg flee\` | \`playrpg battle\`\n` +
+      `🎯 With 2+ targets (boss + Life Trees / Corrupted allies) every damaging action needs a target name: \`attack Chronos\`, \`attack Life Tree\`, \`attack Corrupted Bob\` — same for \`skill\`, \`combo\`, \`ultimate\`\n` +
+      `\`playrpg charge [pct]\` — charged attacks | \`playrpg combo <Name>\` — spend combo | \`playrpg ultimate <Name>\` — class ultimate (Lv 50) | \`playrpg stance <id>\` — combat stances\n\n` +
       `**Gathering & Hunt** — \`playrpg mine\` \`chop\` \`fish\` \`forage\` \`farm\` \`trap\` | \`playrpg hunt\` — track and FIGHT enemies\n` +
       `**Crafting** — \`playrpg recipes <page>\` | \`playrpg recipes food <page>\` | \`playrpg recipes craft <page>\` | \`playrpg craft do <id>\` | \`playrpg discover\` | \`playrpg enchant\` | \`playrpg refine\`\n` +
       `**Quests** — \`playrpg quests\` | \`quests daily\` | \`weekly\` | \`monthly\` | \`bounty\` | \`main\` | \`quest accept <id>\` | \`quest answer <text>\` | \`quest choose <a|b>\`\n` +
       `**Economy** — \`playrpg inventory\` | \`equip <item>\` | \`iteminfo <item>\` | \`shop\` | \`buy <item>\` | \`sell <item>\` | \`bank\` | \`currencies\` | \`auction\` | \`rotatingshop\` | \`secretshop\` | \`traveling\` | \`treasure\` | \`dig\` | \`use <item>\`\n` +
-      `**Bosses** — \`playrpg summon\` (map boss, needs Summoning Stone — others join after traveling here) | \`playrpg summon server megalondon|lichen|chronos\` (needs crafted key item, whole server joins) | \`playrpg boss\` | \`playrpg boss join [server]\` | \`attack tree\` for Lichen's life trees\n` +
+      `**Bosses** — \`playrpg summon\` (map boss, needs Summoning Stone — others join after traveling here) | \`playrpg summon server megalondon|lichen|chronos\` (needs crafted key item, whole server joins) | \`playrpg boss\` | \`playrpg boss join [server]\` | 2+ targets? \`attack <Name>\` (Life Trees, Corrupted allies)\n` +
       `**Companions** — \`playrpg pet <name>\` (Wolf Cub, Baby Dragon...) | \`mount <name>\` (Riding Horse...) — craftable & they buff you\n` +
       `**Social** — \`playrpg party\` | \`guild\` | \`faction\` | \`friend\` | \`playrpg pvp @user [wager]\` — player duels\n` +
       `**Meta** — \`playrpg profile\` | \`stats\` | \`ranks\` | \`features\` | \`feature <name>\` | \`achievements\` | \`bestiary\` | \`codex\` | \`settings\` | \`top\``;
@@ -1898,7 +1901,7 @@ const handlers = {
         s += `${enemyIntro(b.enemy)}\n\n`;
         s += `Members: ${b.players.map(p => `**${p.name}**`).join(", ")}\n`;
         s += `Turn order: ${b.players.map(p => p.name).join(" → ")} → enemy\n\n`;
-        s += `Actions: \`playrpg attack\` (each member takes their turn) | \`skill <id>\` | \`item <name>\` | \`guard\` | \`flee\``;
+        s += `Actions: \`playrpg attack <Name>\` (each member takes their turn) | \`skill <id> <Name>\` | \`item <name>\` | \`guard\` | \`flee\`\n🎯 2+ targets? Name one: \`playrpg attack <Name>\``;
         return s;
       }
 
@@ -2111,7 +2114,8 @@ const handlers = {
     const enemy = res.battle.enemy;
     let s = `⚔️ **ENCOUNTER!**\n\n${enemyIntro(enemy)}\n\n`;
     if (enemy.elite) s += `💀 This is an **elite** — higher rewards, higher risk!\n`;
-    s += `\nActions: \`playrpg attack\` | \`playrpg skill <name>\` | \`playrpg item <name>\` | \`playrpg guard\` | \`playrpg flee\``;
+    s += `\nActions: \`playrpg attack <Name>\` | \`playrpg skill <id> <Name>\` | \`playrpg item <name>\` | \`playrpg guard\` | \`playrpg flee\`\n` +
+      `🎯 2+ targets? Name one: \`playrpg attack <Name>\``;
     return s;
   },
 
