@@ -267,7 +267,7 @@ const handlers = {
         `Mechanics: ${b.desc}\n` +
         `Fight: \`playrpg attack\` | \`skill <id>\` | \`item <name>\` | \`guard\` | \`battle\`\n` +
         (boss.mechanics.lifeTrees ? `When Life Trees appear, focus them: \`playrpg attack tree\`\n` : "") +
-        (boss.mechanics.sanity ? `🧠 Watch your **sanity** — at 0 you become Chronos's ally! Guard to recover some.\n` : "");
+        (boss.mechanics.sanity ? `🧠 Watch your **sanity** — at 0 you become Chronos's ally (and lose a level)! Guard to recover some. Allies can free you with \`playrpg attack corrupted\`.\n` : "");
     }
 
     // ---- MAP BOSS ----
@@ -594,7 +594,7 @@ function _afterPlayerAction(battle, result, player) {
     const enemy = result.battle?.enemy || battle?.enemy;
     if (enemy) {
       for (const member of (result.battle?.players || [player])) {
-        const updates = progressQuest(member, { type: "kill", target: enemy.templateId, family: enemy.family, amount: 1 });
+        const updates = progressQuest(member, { type: "kill", target: enemy.templateId, family: enemy.family, amount: enemy.killsWorth || 1 });
         if (enemy.boss) progressQuest(member, { type: "defeat_boss", target: String(enemy.zoneId), zoneId: enemy.zoneId, amount: 1 });
       }
     }
@@ -2336,21 +2336,31 @@ function onPlayerGuard(battle, player) {
 // ---- corruption -------------------------------------------------
 function corruptPlayer(battle, player) {
   battle.corrupted = battle.corrupted || [];
+  battle.corruptedPlayerRefs = battle.corruptedPlayerRefs || {};
+  // capture the player's ORIGINAL stats BEFORE the death penalty applies
+  const orig = { maxHp: player.maxHp, atk: player.atk, def: player.def, magAtk: player.magAtk, magDef: player.magDef, speed: player.speed };
   // death penalty: corruption IS a death
   const dp = require("./progression").applyDeathPenalty(player);
   const lost = dp.ok && dp.lostLevel ? " and lost a level" : "";
+  // steal ONE of the player's learned skills (used with 30% chance per attack)
+  const { ABILITIES } = require("./combat");
+  const stolen = pick((player.abilities || []).map(id => ABILITIES[id]).filter(a => a && a.power)) || null;
   battle.corrupted.push({
     playerId: player.id,
     name: `Corrupted ${player.name}`,
-    hp: Math.max(1, Math.round(player.maxHp * 0.4)),
-    maxHp: Math.max(1, Math.round(player.maxHp * 0.4)),
-    atk: Math.round(player.atk * 0.4),
-    def: Math.round(player.def * 0.4),
-    speed: Math.round(player.speed * 0.4),
+    hp: Math.max(1, Math.round(orig.maxHp * 0.6)),
+    maxHp: Math.max(1, Math.round(orig.maxHp * 0.6)),
+    atk: Math.round(orig.atk * 0.4),
+    def: Math.round(orig.def * 0.4),
+    magAtk: Math.round(orig.magAtk * 0.4),
+    magDef: Math.round(orig.magDef * 0.4),
+    speed: Math.round(orig.speed * 0.4),
+    skill: stolen ? { id: stolen.id, name: stolen.name, power: stolen.power, element: stolen.element || "physical", emoji: stolen.emoji || "💢", cost: stolen.cost || {} } : null,
   });
+  battle.corruptedPlayerRefs[player.id] = player;
   battle.players = battle.players.filter(p => p.id !== player.id);
   if (battle.sanity) delete battle.sanity[player.id];
-  return `😈 **${player.name} has gone MAD!** They turn into a Corrupted ally of ${battle.boss.name}${lost}!`;
+  return `😈 **${player.name} has gone MAD!** They turn into a Corrupted ally of ${battle.boss.name}${lost}! Free them with \`playrpg attack corrupted\`!`;
 }
 
 function _freeCorrupted(battle) {
@@ -2365,12 +2375,19 @@ function _freeCorrupted(battle) {
 }
 
 // ---- life trees (Lichen) -----------------------------------------
+const MAX_TREES = 3; // Lichen can control a group of 4: itself + 3 trees
+
 function spawnTree(battle, count = 1) {
   battle.adds = battle.adds || [];
+  const alive = aliveTrees(battle).length;
+  const room = Math.max(0, MAX_TREES - alive);
+  if (room <= 0) return 0;
+  count = Math.min(count, room);
   const treeHp = Math.max(10, Math.round(battle.boss.maxHp * 0.05));
   for (let i = 0; i < count; i++) {
     battle.adds.push({ id: `tree_${battle.adds.length + 1}`, name: "Life Tree", hp: treeHp, maxHp: treeHp, type: "life_tree" });
   }
+  return count;
 }
 function aliveTrees(battle) { return (battle.adds || []).filter(a => a.hp > 0); }
 /** Per-tree: +20% boss stats, heals boss 5% maxHp per turn. */
@@ -2396,14 +2413,20 @@ function bossTurn(battle) {
   const { mult } = treeBuff(battle);
   const treeHealed = treeHeal(battle);
 
-  // corrupted allies attack too
+  // corrupted allies attack too — 30% chance to unleash their stolen skill
   let corruptLog = "";
   for (const c of battle.corrupted || []) {
     if (c.hp > 0 && players.length && chance(0.7)) {
       const target = players[randInt(0, players.length - 1)];
-      const dmg = Math.max(1, Math.round(c.atk * (100 / (100 + (target.def || 1)))));
-      target.hp = Math.max(0, target.hp - dmg);
-      corruptLog += `\n😈 **${c.name}** hits ${target.name} for **${dmg}**.`;
+      if (c.skill && chance(0.3)) {
+        const dmg = Math.max(1, Math.round(c.magAtk * c.skill.power * (100 / (100 + (target.magDef || 1)))));
+        target.hp = Math.max(0, target.hp - dmg);
+        corruptLog += `\n${c.skill.emoji} **${c.name}** unleashes **${c.skill.name}** on ${target.name} for **${dmg}**!`;
+      } else {
+        const dmg = Math.max(1, Math.round(c.atk * (100 / (100 + (target.def || 1)))));
+        target.hp = Math.max(0, target.hp - dmg);
+        corruptLog += `\n😈 **${c.name}** hits ${target.name} for **${dmg}**.`;
+      }
     }
   }
 
@@ -2464,8 +2487,8 @@ function rollStrikes() {
 
 function runSpecial(battle, boss, skill) {
   switch (skill.special) {
-    case "spawnTree": spawnTree(battle, 1); return `🌳 **${boss.name}** plants a **Life Tree**! (Target it with \`attack tree\` — it buffs the boss +20% per tree and heals it 5%/turn.)`;
-    case "spawnTree2": spawnTree(battle, 2); return `🌳🌳 **${boss.name}** summons TWO **Life Trees**!`;
+    case "spawnTree": { const n = spawnTree(battle, 1); return n ? `🌳 **${boss.name}** plants a **Life Tree**! (Target it with \`attack tree\` — each tree buffs the boss +20% and heals it 5%/turn, ${aliveTrees(battle).length}/3 max.)` : `🌳 The forest is full — **${boss.name}** can't plant more trees (3 max)!`; }
+    case "spawnTree2": { const n = spawnTree(battle, 2); return n ? `🌳🌳 **${boss.name}** summons **${n}** Life Tree${n > 1 ? "s" : ""}!` : `🌳 The forest is full — **${boss.name}** can't plant more trees (3 max)!`; }
     case "healBoss": {
       const h = Math.round(boss.maxHp * 0.08);
       boss.currentHp = Math.min(boss.maxHp, boss.currentHp + h);
@@ -2538,9 +2561,10 @@ const { ELEMENT_EMOJI, DIFFICULTY_MULT } = require("../config");
 const { randInt, chance, clamp, pick, fmt, d } = require("../util");
 const { activeBattles, addExp, addItemObject, equippedItem } = require("./schema");
 const { applyStatus, tickStatuses, hasStatus, removeStatus, getEffectiveStats } = require("./statusEffects");
-const { createEnemyInstance, getBossForZone, enemyIntro } = require("../world/enemies");
+const { createEnemyInstance, createEnemyGroup, getBossForZone, enemyIntro } = require("../world/enemies");
 const { rollLoot, itemSummary } = require("../world/loot");
 const { rollDungeonEvent, applyDungeonEvent } = require("../world/dungeonevents");
+const GROUP_CHANCE = 0.18;
 
 // One signature ability per class, learned FREE at character creation so
 // every new hero can use skills from level 1.
@@ -2762,7 +2786,11 @@ function computeHit(attacker, defender, { power = 1, element = "physical", isMag
 function _createBattle(players, { zoneId, elite = false, aiEnemy = null, dungeon = null, partyId = null }) {
   const zone = require("../world/zones").getZone(zoneId);
   const top = players.reduce((a, b) => (b.level > a.level ? b : a), players[0]);
-  const enemy = aiEnemy || (zone.worldBoss ? getBossForZone(zone, top.level) : createEnemyInstance({ zoneId, playerLevel: top.level, elite }));
+  // wild encounters: from level 5+ a pack can spawn — ~18% are a GROUP of 2 monsters (dungeon floors stay single)
+  const enemy = aiEnemy ? aiEnemy
+    : zone.worldBoss ? getBossForZone(zone, top.level)
+    : (!dungeon && top.level >= 5 && chance(GROUP_CHANCE)) ? createEnemyGroup(zoneId, top.level, elite)
+    : createEnemyInstance({ zoneId, playerLevel: top.level, elite });
   enemy.difficultyMult = DIFFICULTY_MULT[top.difficulty] || 1;
   const battle = {
     id: `battle_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
@@ -2822,6 +2850,7 @@ function startBossEncounter(players, boss, { zoneId, server = false, summonerId 
   battle.serverBoss = server;
   battle.adds = [];
   battle.corrupted = [];
+  battle.corruptedPlayerRefs = {};
   require("./bossfight").initSanity(battle);
   if (server) bossBattles.server = battle;
   else bossBattles.map = battle;
@@ -2855,7 +2884,8 @@ function _nextMember(battle, player) {
   const alive = _alive(battle);
   if (alive.length <= 1) return null;
   const idx = alive.findIndex(p => p.id === player.id);
-  return alive[(idx + 1) % alive.length];
+  if (idx < 0 || idx >= alive.length - 1) return null; // last member: enemy/boss acts now
+  return alive[idx + 1];
 }
 
 function _afterTurn(battle, player) {
@@ -2959,6 +2989,31 @@ function playerAction(battle, player, action, { skillId = null, itemName = null,
       if (add.hp <= 0) {
         battle.adds = battle.adds.filter(a => a.hp > 0);
         _log(battle, `🍂 The **${add.name}** withers — the boss loses its buff!`);
+      }
+      player.combo += 1;
+      return { ok: true, battle, ..._afterTurn(battle, player) };
+    }
+    // targeting a corrupted ally (Chronos): break the corruption to free the player
+    const corruptTarget = (target === "corrupted" || target === "corrupt") && (battle.corrupted || []).some(c => c.hp > 0);
+    if (corruptTarget) {
+      const c = battle.corrupted.find(c => c.hp > 0);
+      const dmg = Math.max(1, Math.round(player.atk * 0.6));
+      c.hp = Math.max(0, c.hp - dmg);
+      _log(battle, `🪓 **${player.name}** strikes the **${c.name}** for **${dmg}** (${c.hp}/${c.maxHp} HP).`);
+      if (c.hp <= 0) {
+        battle.corrupted = battle.corrupted.filter(x => x.playerId !== c.playerId);
+        const ref = (battle.corruptedPlayerRefs || {})[c.playerId];
+        if (ref && !battle.players.includes(ref)) {
+          ref.hp = Math.max(1, Math.round(ref.maxHp * 0.3));
+          ref.mp = Math.round(ref.maxMp * 0.25);
+          ref.stamina = Math.round(ref.maxStamina * 0.5);
+          ref.statusEffects = [];
+          battle.players.push(ref);
+          if (battle.sanity) delete battle.sanity[ref.id];
+          _log(battle, `✨ **${ref.name} breaks free of the corruption** and rejoins the fight at 30% HP!`);
+        } else {
+          _log(battle, `💥 The corruption shatters — **${c.name}** is destroyed!`);
+        }
       }
       player.combo += 1;
       return { ok: true, battle, ..._afterTurn(battle, player) };
@@ -3156,47 +3211,49 @@ function enemyTurn(battle) {
   const eTick = tickStatuses(enemy, { isPlayer: false });
   for (const l of eTick.log) _log(battle, l);
   if (enemy.currentHp <= 0) return;
+
+  // shared hit application (skill / basic / group-member strikes)
+  const _strike = (attacker, target, { power, element, isMagical }) => {
+    const hit = computeHit(attacker, target, { power, element, isMagical });
+    if (!hit.dodged) {
+      if (target.guarding && chance(0.4)) {
+        _log(battle, `🛡️ **PERFECT BLOCK!** ${target.name} negates the attack entirely!`);
+        target.counterWindow = true;
+      } else {
+        const absorbed = _absorbShield(target, hit.damage);
+        target.hp = Math.max(0, target.hp - absorbed.remaining);
+        if (absorbed.blocked > 0) _log(battle, `🧱 Shield absorbs **${absorbed.blocked}** damage!`);
+        _log(battle, hit.logLine);
+        if (hit.parried) target.counterWindow = true;
+      }
+    }
+    return hit;
+  };
+
   const skill = enemy.skills.filter(s => !(s.cd > 0)).sort(() => Math.random() - 0.5)[0];
   let usedSkill = false;
   let lastHit = null;
   if (skill && chance(0.4)) {
     skill.cd = skill.cooldown;
-    const hit = computeHit(enemy, player, { power: skill.power, element: skill.element, isMagical: true });
-    lastHit = hit;
     _log(battle, `${ELEMENT_EMOJI[skill.element] || ""} **${enemy.name}** uses **${skill.name}**!`);
-    if (!hit.dodged) {
-      if (player.guarding && chance(0.4)) {
-        _log(battle, `🛡️ **PERFECT BLOCK!** ${player.name} negates the attack entirely!`);
-        player.counterWindow = true;
-      } else {
-        const absorbed = _absorbShield(player, hit.damage);
-        player.hp = Math.max(0, player.hp - absorbed.remaining);
-        if (absorbed.blocked > 0) _log(battle, `🧱 Shield absorbs **${absorbed.blocked}** damage!`);
-        _log(battle, hit.logLine);
-        if (hit.parried) player.counterWindow = true;
-        if (skill.statusId && chance(skill.statusChance || 1)) {
-          const potency = Math.max(1, Math.round(enemy.magAtk * 0.08) * (enemy.venomous && skill.statusId === "poison" ? 1.3 : 1));
-          applyStatus(player, skill.statusId, { potency, duration: 2 });
-          _log(battle, `😵 ${player.name} is afflicted by **${skill.statusId.replace(/_/g, " ")}**!`);
-        }
-      }
+    lastHit = _strike(enemy, player, { power: skill.power, element: skill.element, isMagical: true });
+    if (!lastHit.dodged && skill.statusId && chance(skill.statusChance || 1)) {
+      const potency = Math.max(1, Math.round(enemy.magAtk * 0.08) * (enemy.venomous && skill.statusId === "poison" ? 1.3 : 1));
+      applyStatus(player, skill.statusId, { potency, duration: 2 });
+      _log(battle, `😵 ${player.name} is afflicted by **${skill.statusId.replace(/_/g, " ")}**!`);
     }
     usedSkill = true;
   }
   if (!usedSkill) {
-    const hit = computeHit(enemy, player, { power: 1, element: "physical" });
-    lastHit = hit;
-    if (!hit.dodged) {
-      if (player.guarding && chance(0.4)) {
-        _log(battle, `🛡️ **PERFECT BLOCK!** ${player.name} negates the attack entirely!`);
-        player.counterWindow = true;
-      } else {
-        const absorbed = _absorbShield(player, hit.damage);
-        player.hp = Math.max(0, player.hp - absorbed.remaining);
-        if (absorbed.blocked > 0) _log(battle, `🧱 Shield absorbs **${absorbed.blocked}** damage!`);
-        _log(battle, hit.logLine);
-        if (hit.parried) player.counterWindow = true;
-      }
+    lastHit = _strike(enemy, player, { power: 1, element: "physical" });
+  }
+  // GROUP OF 2: the second monster takes its own swipe (can hit another party member)
+  if (enemy.groupSize === 2 && enemy.currentHp > 0) {
+    const target2 = _pickTarget(battle);
+    if (target2) {
+      const member = enemy.memberNames?.[1] || "its partner";
+      const h = _strike({ ...enemy, name: member }, target2, { power: 0.55, element: "physical" });
+      lastHit = h;
     }
   }
   // family passive procs (webbed strike, etc.)
@@ -3249,8 +3306,8 @@ function endBattle(battle, result) {
     survivors.forEach((player, i) => {
       const lvl = addExp(player, xpGain);
       player.gold += share;
-      player.kills += 1;
-      if (player.bestiary) player.bestiary.add(enemy.templateId);
+      player.kills += enemy.killsWorth || 1;
+      if (player.bestiary) for (const tid of enemy.templateIds || [enemy.templateId]) player.bestiary.add(tid);
       gainPetXp(player, xpGain);
       const wpn = equippedItem(player, "weapon");
       if (wpn?.type) gainMastery(player, wpn.type, 1);
@@ -3400,7 +3457,9 @@ function battleStatusText(battle) {
     s += `\n`;
   } else {
     s = `**Round ${battle.round}** — ${battle.state === "active" ? "⚔️ In combat" : `Over (${battle.state})`}${battle.dungeon ? ` | 🏰 Floor ${battle.dungeon.floor}/${battle.dungeon.totalFloors}` : ""}\n\n`;
-    s += `${enemyIntro(enemy)}\n\n`;
+    s += `${enemyIntro(enemy)}\n`;
+    if (enemy.groupSize === 2) s += `🐾 **GROUP** — 2 monsters fight together (both strike every round)\n\n`;
+    else s += `\n`;
   }
   for (const p of alive) {
     const turn = battle.turn === p.id ? " 🎯" : "";
@@ -3412,7 +3471,7 @@ function battleStatusText(battle) {
   }
   const down = battle.players.filter(p => p.hp <= 0);
   if (down.length) s += `💀 Down: ${down.map(p => p.name).join(", ")}\n`;
-  if (battle.corrupted?.length) s += `😈 Corrupted: ${battle.corrupted.map(c => c.name).join(", ")}\n`;
+  if (battle.corrupted?.length) s += `😈 Corrupted: ${battle.corrupted.map(c => c.name).join(", ")} — free them with \`playrpg attack corrupted\`\n`;
   if (battle.players.length > 1) s += `\nTurn: **${battle.players.find(p => p.id === battle.turn)?.name || "—"}** (${battle.players.length} fighters)`;
   return s;
 }
@@ -6108,7 +6167,7 @@ const SERVER_BOSSES = {
     id: "lichen", key: "lichen",
     name: "Lichen", title: "God of Nature",
     emoji: "🌳", element: "earth",
-    desc: "Spawns Life Trees that buff its stats and heal it. Hits hard.",
+    desc: "Controls a group of 4: itself + up to 3 Life Trees (each +20% stats & 5% heal/turn). Hits hard.",
     statMult: { hp: 250, atk: 14, def: 12, magAtk: 10, magDef: 11, speed: 8 },
     skills: LICHEN_SKILLS,
     mechanics: { lifeTrees: true },
@@ -6117,7 +6176,7 @@ const SERVER_BOSSES = {
     id: "chronos", key: "chronos",
     name: "Chronos", title: "Guardian of Time",
     emoji: "⏳", element: "arcane",
-    desc: "Sanity mechanics: 0 sanity = instant corruption into its ally. Can multi-strike. Lowest damage.",
+    desc: "Group of INFINITE: 0 sanity = instant corruption into its ally (60% HP / 40% of your other stats, 1 stolen skill). Can multi-strike. Lowest damage.",
     statMult: { hp: 200, atk: 6, def: 10, magAtk: 6, magDef: 14, speed: 12 },
     skills: CHRONOS_SKILLS,
     mechanics: { sanity: true, strikes: true },
@@ -6632,6 +6691,42 @@ function createEnemyInstance({ zoneId, playerLevel, elite = false, boss = false,
   return e;
 }
 
+/**
+ * GROUP ENCOUNTER: two monsters of the same family fight as one unit.
+ * Combined HP (sum), combined ATK (sum) with a second monster swipe per
+ * turn, shared best DEF/MDEF/SPD, slightly discounted XP/gold (0.9x sum),
+ * and counts as 2 kills for quests. Falls back to a single enemy if the
+ * zone can't field two templates.
+ */
+function createEnemyGroup(zoneId, playerLevel, elite = false) {
+  const zone = getZone(zoneId);
+  const tier = zone.tier;
+  const pool = ENEMY_REGISTRY.filter(t => tier >= t.tierRange[0] && tier <= t.tierRange[1]);
+  if (pool.length < 2) return createEnemyInstance({ zoneId, playerLevel, elite });
+  const e1 = createEnemyInstance({ zoneId, playerLevel, elite });
+  const mates = pool.filter(t => t.family === e1.family && t.id !== e1.templateId);
+  const e2 = createEnemyInstance({ zoneId, playerLevel, elite, template: mates.length ? pick(mates) : null });
+  return {
+    ...e1,
+    groupSize: 2,
+    memberNames: [e1.name, e2.name],
+    templateIds: [e1.templateId, e2.templateId],
+    name: `${e1.name} & ${e2.name}`,
+    hp: e1.hp + e2.hp,
+    maxHp: e1.hp + e2.hp,
+    currentHp: e1.hp + e2.hp,
+    atk: e1.atk + e2.atk,
+    magAtk: e1.magAtk + e2.magAtk,
+    def: Math.max(e1.def, e2.def),
+    magDef: Math.max(e1.magDef, e2.magDef),
+    speed: Math.max(e1.speed, e2.speed),
+    xpReward: Math.round((e1.xpReward + e2.xpReward) * 0.9),
+    goldReward: Math.round((e1.goldReward + e2.goldReward) * 0.9),
+    killsWorth: 2,
+    introText: `${e1.introText}\n🐾 **${e1.name}** and **${e2.name}** hunt as a pack!`,
+  };
+}
+
 function getEnemyForZone(zone, playerLevel) {
   const tier = zone.tier;
   const pool = ENEMY_REGISTRY.filter(t => tier >= t.tierRange[0] && tier <= t.tierRange[1]);
@@ -6667,7 +6762,7 @@ function enemyIntro(e) {
 module.exports = {
   FAMILIES, VARIANTS, BANDS, ENEMY_SKILLS, ELITE_MODIFIERS, FACTIONS,
   FAMILY_SKILL_POOLS, FAMILY_PASSIVES,
-  ENEMY_REGISTRY, createEnemyInstance, getEnemyForZone, getBossForZone,
+  ENEMY_REGISTRY, createEnemyInstance, createEnemyGroup, getEnemyForZone, getBossForZone,
   getEnemyFactions, enemySummary, enemyIntro,
 };
 });
