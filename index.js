@@ -266,8 +266,8 @@ const handlers = {
         `👥 **EVERYONE IN THE SERVER** can join: \`playrpg boss join server\`\n` +
         `Mechanics: ${b.desc}\n` +
         `Fight: \`playrpg attack\` | \`skill <id>\` | \`item <name>\` | \`guard\` | \`battle\`\n` +
-        (boss.mechanics.lifeTrees ? `When Life Trees appear, focus them: \`playrpg attack tree\`\n` : "") +
-        (boss.mechanics.sanity ? `🧠 Watch your **sanity** — at 0 you become Chronos's ally (and lose a level)! Guard to recover some. Allies can free you with \`playrpg attack corrupted\`.\n` : "");
+        (boss.mechanics.lifeTrees ? `When Life Trees appear, focus them: \`playrpg attack Life Tree\`\n` : "") +
+        (boss.mechanics.sanity ? `🧠 Watch your **sanity** — at 0 you become Chronos's ally (and lose a level)! Guard to recover some. Allies can free you by targeting the corruption: \`playrpg attack Corrupted <name>\`.\n` : "");
     }
 
     // ---- MAP BOSS ----
@@ -550,6 +550,7 @@ const REASONS = {
   no_battle: "No battle! Use `playrpg explore` or `playrpg party hunt`.",
 };
 function _err(result) {
+  if (result.message) return `❌ ${result.message}`;
   return `❌ ${REASONS[result.reason] || result.reason}`;
 }
 
@@ -606,8 +607,8 @@ const handlers = {
   attack(message, args, player) {
     const battle = getPlayerBattle(player.id);
     if (!battle) return "❌ No battle! Use `playrpg explore` to find enemies.";
-    // `attack tree` targets boss adds (Lichen's Life Trees)
-    const result = playerAction(battle, player, "attack", { target: args[0] ? args[0].toLowerCase() : null });
+    // optional target by NAME: `attack Chronos` / `attack Life Tree` / `attack Corrupted Bob` (multi-word)
+    const result = playerAction(battle, player, "attack", { target: args.join(" ").trim() });
     if (result.ok === false) return _err(result);
     return _afterPlayerAction(battle, result, player);
   },
@@ -627,10 +628,10 @@ const handlers = {
       if (wp) s += `\n\n🔮 Weapon passive: **${wp.name}** — ${wp.desc}`;
       return s;
     }
-    const result = playerAction(battle, player, "skill", { skillId });
+    const result = playerAction(battle, player, "skill", { skillId, target: args.slice(1).join(" ").trim() });
     if (result.ok === false) {
       const reasons = { unknown_skill: "Unknown skill.", not_learned: "You haven't learned that skill (or it doesn't match your weapon).", insufficient_resource: "Not enough MP/stamina!", on_cooldown: "That skill is on cooldown!", not_your_turn: "Not your turn — wait for your party member!" };
-      return `❌ ${reasons[result.reason] || result.reason}`;
+      return `❌ ${reasons[result.reason] || result.reason}${result.message ? `\n${result.message}` : ""}`;
     }
     return _afterPlayerAction(battle, result, player);
   },
@@ -694,10 +695,10 @@ const handlers = {
   combo(message, args, player) {
     const battle = getPlayerBattle(player.id);
     if (!battle) return "❌ No battle!";
-    const result = playerAction(battle, player, "combo");
+    const result = playerAction(battle, player, "combo", { target: args.join(" ").trim() });
     if (result.ok === false) {
       if (result.reason === "need_combo") return `❌ Need at least **3 combo** to spend. Current: ${player.combo || 0}. Land attacks to build it.`;
-      return `❌ ${result.reason}`;
+      return _err(result);
     }
     return _finish(battle, result);
   },
@@ -717,10 +718,10 @@ const handlers = {
       const ab = ABILITIES[player.ultimate];
       return `🌟 **${ab.name}** ${ab.emoji} — ${ab.desc}\nIn battle: \`playrpg ultimate\` (cooldown ${ab.cooldown} turns)`;
     }
-    const result = playerAction(battle, player, "ultimate");
+    const result = playerAction(battle, player, "ultimate", { target: args.slice(1).join(" ").trim() });
     if (result.ok === false) {
       const reasons = { no_ultimate: "No ultimate learned. Reach level 50 + `playrpg ultimate learn`.", on_cooldown: "Ultimate is on cooldown!", insufficient_resource: "Not enough resources!" };
-      return `❌ ${reasons[result.reason] || result.reason}`;
+      return `❌ ${reasons[result.reason] || result.reason}${result.message ? `\n${result.message}` : ""}`;
     }
     return _finish(battle, result);
   },
@@ -2360,7 +2361,7 @@ function corruptPlayer(battle, player) {
   battle.corruptedPlayerRefs[player.id] = player;
   battle.players = battle.players.filter(p => p.id !== player.id);
   if (battle.sanity) delete battle.sanity[player.id];
-  return `😈 **${player.name} has gone MAD!** They turn into a Corrupted ally of ${battle.boss.name}${lost}! Free them with \`playrpg attack corrupted\`!`;
+  return `😈 **${player.name} has gone MAD!** They turn into a Corrupted ally of ${battle.boss.name}${lost}! Allies can free them by targeting the corruption: \`playrpg attack Corrupted <name>\`!`;
 }
 
 function _freeCorrupted(battle) {
@@ -2487,7 +2488,7 @@ function rollStrikes() {
 
 function runSpecial(battle, boss, skill) {
   switch (skill.special) {
-    case "spawnTree": { const n = spawnTree(battle, 1); return n ? `🌳 **${boss.name}** plants a **Life Tree**! (Target it with \`attack tree\` — each tree buffs the boss +20% and heals it 5%/turn, ${aliveTrees(battle).length}/3 max.)` : `🌳 The forest is full — **${boss.name}** can't plant more trees (3 max)!`; }
+    case "spawnTree": { const n = spawnTree(battle, 1); return n ? `🌳 **${boss.name}** plants a **Life Tree**! (Target it with \`attack Life Tree\` — each tree buffs the boss +20% and heals it 5%/turn, ${aliveTrees(battle).length}/3 max.)` : `🌳 The forest is full — **${boss.name}** can't plant more trees (3 max)!`; }
     case "spawnTree2": { const n = spawnTree(battle, 2); return n ? `🌳🌳 **${boss.name}** summons **${n}** Life Tree${n > 1 ? "s" : ""}!` : `🌳 The forest is full — **${boss.name}** can't plant more trees (3 max)!`; }
     case "healBoss": {
       const h = Math.round(boss.maxHp * 0.08);
@@ -2941,21 +2942,44 @@ function _useSkill(battle, player, ab, opts = {}) {
       _log(battle, `👁️ ${enemy.name} is afflicted by **${ab.statusId.replace(/_/g, " ")}**!`);
     }
   } else if (ab.kind === "damage") {
-    // execute: bonus vs low-HP foes
+    // single-target skills use the same target selection as attacks
+    // (pre-resolved in playerAction so cost isn't wasted); area skills
+    // always hit the boss + cleave everything else
+    let tgt = null, tgtKind = "boss";
+    if (opts.tgtRes) {
+      tgt = opts.tgtRes.chosen.ref;
+      tgtKind = opts.tgtRes.chosen.kind;
+      if (tgtKind !== "boss") _log(battle, `🎯 Targeting **${opts.tgtRes.chosen.name}**...`);
+    }
+    const victim = tgtKind === "boss" ? enemy : tgt;
+    // execute: bonus vs low-HP bosses
     let power = ab.power;
-    if (ab.execute && enemy.currentHp <= enemy.maxHp * 0.2) {
+    if (ab.execute && tgtKind === "boss" && enemy.currentHp <= enemy.maxHp * 0.2) {
       power *= 1.8;
       _log(battle, `⚡ **EXECUTE!** ${enemy.name} is below 20% HP!`);
     }
     const hits = ab.hits || 1;
     for (let i = 0; i < hits; i++) {
-      const hit = computeHit(player, enemy, { power: power / hits, element: ab.element, isMagical: /mp/.test(JSON.stringify(ab.cost)), critBonus: ab.critBonus || 0, piercing: ab.piercing || 0 });
-      if (!hit.dodged) enemy.currentHp = Math.max(0, enemy.currentHp - hit.damage);
+      const hit = computeHit(player, victim, { power: power / hits, element: ab.element, isMagical: /mp/.test(JSON.stringify(ab.cost)), critBonus: ab.critBonus || 0, piercing: ab.piercing || 0 });
+      if (!hit.dodged) {
+        if (tgtKind === "add") {
+          victim.hp = Math.max(0, victim.hp - hit.damage);
+          if (victim.hp <= 0) {
+            battle.adds = battle.adds.filter(a => a.hp > 0);
+            _log(battle, `🍂 The **${victim.name}** withers — the boss loses its buff!`);
+          }
+        } else if (tgtKind === "corrupted") {
+          victim.hp = Math.max(0, victim.hp - hit.damage);
+          if (victim.hp <= 0) _freeCorrupted(battle, victim);
+        } else {
+          enemy.currentHp = Math.max(0, enemy.currentHp - hit.damage);
+        }
+      }
       _log(battle, `🎯 ${hit.logLine}`);
     }
     if (ab.statusId && chance(ab.statusChance || 1)) {
-      applyStatus(enemy, ab.statusId, { potency: Math.max(1, Math.round(player.magAtk * 0.08)), duration: 3 });
-      _log(battle, `☄️ ${enemy.name} is afflicted by **${ab.statusId.replace(/_/g, " ")}**!`);
+      applyStatus(victim, ab.statusId, { potency: Math.max(1, Math.round(player.magAtk * 0.08)), duration: 3 });
+      _log(battle, `☄️ ${victim.name} is afflicted by **${ab.statusId.replace(/_/g, " ")}**!`);
     }
     // area skills also cleave boss adds (life trees)
     if (ab.area && battle.adds?.length) {
@@ -2966,11 +2990,52 @@ function _useSkill(battle, player, ab, opts = {}) {
       }
       battle.adds = battle.adds.filter(a => a.hp > 0);
     }
+    // ...and cleave corrupted minions (Chronos) — skills can free allies too
+    if (ab.area && battle.corrupted?.length) {
+      for (const c of battle.corrupted.filter(x => x.hp > 0)) {
+        const d = Math.max(1, Math.round(player.atk * 0.5));
+        c.hp = Math.max(0, c.hp - d);
+        _log(battle, `😈 The **${c.name}** takes **${d}** from the area attack.`);
+        if (c.hp <= 0) _freeCorrupted(battle, c);
+      }
+    }
   }
   // weapon skill bonuses
   if (ab.comboBonus) player.combo = (player.combo || 0) + ab.comboBonus;
   if (ab.counterWindow) player.counterWindow = true;
   return true;
+}
+
+/** All attackable targets in a battle (boss + alive adds + alive corrupted). */
+function battleTargets(battle) {
+  const list = [{ kind: "boss", name: battle.enemy.name, hp: battle.enemy.currentHp, maxHp: battle.enemy.maxHp, ref: battle.enemy }];
+  for (const a of battle.adds || []) if (a.hp > 0) list.push({ kind: "add", name: a.name, hp: a.hp, maxHp: a.maxHp, ref: a });
+  for (const c of battle.corrupted || []) if (c.hp > 0) list.push({ kind: "corrupted", name: c.name, hp: c.hp, maxHp: c.maxHp, ref: c });
+  return list;
+}
+
+/** Resolve `attack <Name>` / `skill <id> <Name>` to a target. With 2+ targets a name is required. */
+function resolveTarget(battle, q) {
+  const targets = battleTargets(battle);
+  const ql = (q || "").toLowerCase().trim();
+  if (ql) {
+    if (ql === "tree" || ql === "add") {
+      const t = targets.find(t => t.kind === "add");
+      return t ? { ok: true, chosen: t, targets } : { ok: false, reason: "unknown_target", message: `No trees to target right now. Available: ${targets.map(t => `\`${t.name}\``).join(", ")}` };
+    }
+    if (ql === "corrupted" || ql === "corrupt") {
+      const t = targets.find(t => t.kind === "corrupted");
+      return t ? { ok: true, chosen: t, targets } : { ok: false, reason: "unknown_target", message: `No corrupted allies to target right now. Available: ${targets.map(t => `\`${t.name}\``).join(", ")}` };
+    }
+    const matches = targets.filter(t => t.name.toLowerCase().includes(ql));
+    if (matches.length === 1) return { ok: true, chosen: matches[0], targets };
+    if (matches.length > 1) return { ok: true, chosen: matches.sort((a, b) => b.name.length - a.name.length)[0], targets }; // most specific match wins
+    return { ok: false, reason: "unknown_target", message: `Unknown target \`${q}\`. Available: ${targets.map(t => `\`${t.name}\``).join(", ")}` };
+  }
+  if (targets.length > 1) {
+    return { ok: false, reason: "choose_target", message: `⚠️ Multiple targets! Add a target: \`playrpg <action> <Name>\` — ${targets.map(t => `\`${t.name}\``).join(", ")}` };
+  }
+  return { ok: true, chosen: targets[0], targets };
 }
 
 function playerAction(battle, player, action, { skillId = null, itemName = null, stanceId = null, power = 100, target = null } = {}) {
@@ -2979,10 +3044,13 @@ function playerAction(battle, player, action, { skillId = null, itemName = null,
   const enemy = battle.enemy;
 
   if (action === "attack") {
-    // targeting a summonable add (Lichen's Life Trees, etc.)
-    const addTarget = (target === "add" || target === "tree") && (battle.adds || []).some(a => a.hp > 0);
-    if (addTarget) {
-      const add = battle.adds.find(a => a.hp > 0);
+    // generic target selection: with 2+ targets you MUST name one
+    const res = resolveTarget(battle, target);
+    if (!res.ok) return res;
+    const chosen = res.chosen;
+
+    if (chosen.kind === "add") {
+      const add = chosen.ref;
       const dmg = Math.max(1, Math.round(player.atk * 0.9));
       add.hp = Math.max(0, add.hp - dmg);
       _log(battle, `🪓 **${player.name}** attacks the **${add.name}** for **${dmg}** (${add.hp}/${add.maxHp} HP).`);
@@ -2993,31 +3061,16 @@ function playerAction(battle, player, action, { skillId = null, itemName = null,
       player.combo += 1;
       return { ok: true, battle, ..._afterTurn(battle, player) };
     }
-    // targeting a corrupted ally (Chronos): break the corruption to free the player
-    const corruptTarget = (target === "corrupted" || target === "corrupt") && (battle.corrupted || []).some(c => c.hp > 0);
-    if (corruptTarget) {
-      const c = battle.corrupted.find(c => c.hp > 0);
+    if (chosen.kind === "corrupted") {
+      const c = chosen.ref;
       const dmg = Math.max(1, Math.round(player.atk * 0.6));
       c.hp = Math.max(0, c.hp - dmg);
       _log(battle, `🪓 **${player.name}** strikes the **${c.name}** for **${dmg}** (${c.hp}/${c.maxHp} HP).`);
-      if (c.hp <= 0) {
-        battle.corrupted = battle.corrupted.filter(x => x.playerId !== c.playerId);
-        const ref = (battle.corruptedPlayerRefs || {})[c.playerId];
-        if (ref && !battle.players.includes(ref)) {
-          ref.hp = Math.max(1, Math.round(ref.maxHp * 0.3));
-          ref.mp = Math.round(ref.maxMp * 0.25);
-          ref.stamina = Math.round(ref.maxStamina * 0.5);
-          ref.statusEffects = [];
-          battle.players.push(ref);
-          if (battle.sanity) delete battle.sanity[ref.id];
-          _log(battle, `✨ **${ref.name} breaks free of the corruption** and rejoins the fight at 30% HP!`);
-        } else {
-          _log(battle, `💥 The corruption shatters — **${c.name}** is destroyed!`);
-        }
-      }
+      if (c.hp <= 0) _freeCorrupted(battle, c);
       player.combo += 1;
       return { ok: true, battle, ..._afterTurn(battle, player) };
     }
+    // otherwise: normal attack on the boss/enemy
     let powerMult = 1;
     // charged attack: consume stored charge
     if (battle.charging && battle.charging.playerId === player.id) {
@@ -3084,9 +3137,27 @@ function playerAction(battle, player, action, { skillId = null, itemName = null,
 
   if (action === "combo") {
     if (!player.combo || player.combo < 3) return { ok: false, reason: "need_combo" };
+    // combo is an attack action: must name a target when 2+ exist (combo NOT spent on error)
+    const res = resolveTarget(battle, (target || "").toLowerCase().trim());
+    if (!res.ok) return res;
+    const chosen = res.chosen;
+    const victim = chosen.kind === "boss" ? enemy : chosen.ref;
     const powerMult = 1 + player.combo * 0.15;
-    const hit = computeHit(player, enemy, { power: powerMult, element: "physical", critBonus: 0.1 });
-    if (!hit.dodged) enemy.currentHp = Math.max(0, enemy.currentHp - hit.damage);
+    const hit = computeHit(player, victim, { power: powerMult, element: "physical", critBonus: 0.1 });
+    if (!hit.dodged) {
+      if (chosen.kind === "add") {
+        victim.hp = Math.max(0, victim.hp - hit.damage);
+        if (victim.hp <= 0) {
+          battle.adds = battle.adds.filter(a => a.hp > 0);
+          _log(battle, `🍂 The **${victim.name}** withers — the boss loses its buff!`);
+        }
+      } else if (chosen.kind === "corrupted") {
+        victim.hp = Math.max(0, victim.hp - hit.damage);
+        if (victim.hp <= 0) _freeCorrupted(battle, victim);
+      } else {
+        enemy.currentHp = Math.max(0, enemy.currentHp - hit.damage);
+      }
+    }
     _log(battle, `💥 **COMBO ATTACK!** Spending ${player.combo} combo for x${powerMult.toFixed(2)}! ${hit.logLine}`);
     player.combo = 0;
     return { ok: true, battle, ..._afterTurn(battle, player) };
@@ -3105,9 +3176,15 @@ function playerAction(battle, player, action, { skillId = null, itemName = null,
     const ab = ABILITIES[player.ultimate];
     if (!ab) return { ok: false, reason: "unknown_ultimate" };
     if ((player.cooldowns[ab.id] || 0) > 0) return { ok: false, reason: "on_cooldown" };
+    // single-target damage ultimates obey the same target rules (validated before paying cost)
+    let tgtRes = null;
+    if (ab.kind === "damage" && !ab.area) {
+      tgtRes = resolveTarget(battle, (target || "").toLowerCase().trim());
+      if (!tgtRes.ok) return tgtRes;
+    }
     if (!_payCost(player, ab.cost)) return { ok: false, reason: "insufficient_resource" };
     player.cooldowns[ab.id] = ab.cooldown;
-    _useSkill(battle, player, ab);
+    _useSkill(battle, player, ab, { tgtRes });
     return { ok: true, battle, ..._afterTurn(battle, player) };
   }
 
@@ -3118,9 +3195,15 @@ function playerAction(battle, player, action, { skillId = null, itemName = null,
     const isWeaponSkill = ab.weaponTypes && wpType && ab.weaponTypes.includes(wpType);
     if (!(player.abilities || []).includes(ab.id) && !isWeaponSkill) return { ok: false, reason: "not_learned" };
     if ((player.cooldowns[ab.id] || 0) > 0) return { ok: false, reason: "on_cooldown" };
+    // single-target damage skills obey the same target rules as attacks (validated before paying cost)
+    let tgtRes = null;
+    if (ab.kind === "damage" && !ab.area) {
+      tgtRes = resolveTarget(battle, (target || "").toLowerCase().trim());
+      if (!tgtRes.ok) return tgtRes;
+    }
     if (!_payCost(player, ab.cost)) return { ok: false, reason: "insufficient_resource" };
     player.cooldowns[ab.id] = ab.cooldown;
-    _useSkill(battle, player, ab);
+    _useSkill(battle, player, ab, { target, tgtRes });
     return { ok: true, battle, ..._afterTurn(battle, player) };
   }
 
@@ -3247,12 +3330,12 @@ function enemyTurn(battle) {
   if (!usedSkill) {
     lastHit = _strike(enemy, player, { power: 1, element: "physical" });
   }
-  // GROUP OF 2: the second monster takes its own swipe (can hit another party member)
+  // GROUP OF 2: the second monster swipes too — packs focus the SAME target
   if (enemy.groupSize === 2 && enemy.currentHp > 0) {
-    const target2 = _pickTarget(battle);
-    if (target2) {
+    const t2 = player.hp > 0 ? player : _pickTarget(battle);
+    if (t2) {
       const member = enemy.memberNames?.[1] || "its partner";
-      const h = _strike({ ...enemy, name: member }, target2, { power: 0.55, element: "physical" });
+      const h = _strike({ ...enemy, name: member }, t2, { power: 0.55, element: "physical" });
       lastHit = h;
     }
   }
@@ -3275,6 +3358,24 @@ function _absorbShield(player, damage) {
   shield.potency -= blocked;
   if (shield.potency <= 0) removeStatus(player, "shield");
   return { blocked, remaining: damage - blocked };
+}
+
+/** Break a corrupted minion: remove it and restore the player at 50% HP. */
+function _freeCorrupted(battle, c) {
+  battle.corrupted = battle.corrupted.filter(x => x.playerId !== c.playerId);
+  const ref = (battle.corruptedPlayerRefs || {})[c.playerId];
+  if (ref && !battle.players.includes(ref)) {
+    ref.hp = Math.max(1, Math.round(ref.maxHp * 0.5));
+    ref.mp = Math.round(ref.maxMp * 0.3);
+    ref.stamina = Math.round(ref.maxStamina * 0.5);
+    ref.statusEffects = [];
+    battle.players.push(ref);
+    if (battle.sanity) delete battle.sanity[ref.id];
+    _log(battle, `✨ **${ref.name} breaks free of the corruption** and rejoins the fight at 50% HP!`);
+    return ref;
+  }
+  _log(battle, `💥 The corruption shatters — **${c.name}** is destroyed!`);
+  return null;
 }
 
 function endBattle(battle, result) {
@@ -3452,7 +3553,7 @@ function battleStatusText(battle) {
     s = `**Round ${battle.round}** — ⚔️ **BOSS FIGHT**${battle.serverBoss ? " 🌍 SERVER BOSS" : " 🗺️ MAP BOSS"}\n\n`;
     s += `${enemyIntro(enemy)}\n`;
     if ((battle.adds || []).some(a => a.hp > 0)) {
-      s += `\n🌳 **Adds:** ${battle.adds.filter(a => a.hp > 0).map(a => `${a.name} (${a.hp}/${a.maxHp} HP) — \`attack tree\``).join(" | ")}\n`;
+      s += `\n🌳 **Adds:** ${battle.adds.filter(a => a.hp > 0).map(a => `${a.name} (${a.hp}/${a.maxHp} HP) — \`attack ${a.name}\``).join(" | ")}\n`;
     }
     s += `\n`;
   } else {
@@ -3471,7 +3572,7 @@ function battleStatusText(battle) {
   }
   const down = battle.players.filter(p => p.hp <= 0);
   if (down.length) s += `💀 Down: ${down.map(p => p.name).join(", ")}\n`;
-  if (battle.corrupted?.length) s += `😈 Corrupted: ${battle.corrupted.map(c => c.name).join(", ")} — free them with \`playrpg attack corrupted\`\n`;
+  if (battle.corrupted?.length) s += `😈 Corrupted: ${battle.corrupted.map(c => `${c.name} (${c.hp}/${c.maxHp} HP) — \`attack ${c.name}\``).join(" | ")}\n`;
   if (battle.players.length > 1) s += `\nTurn: **${battle.players.find(p => p.id === battle.turn)?.name || "—"}** (${battle.players.length} fighters)`;
   return s;
 }
@@ -3482,7 +3583,7 @@ module.exports = {
   startEncounter, startPartyEncounter, startBossEncounter, getBossBattle,
   joinBossBattle, bossBattles,
   getPlayerBattle, playerAction, enemyTurn, endBattle,
-  battleStatusText, bindProgressionHooks,
+  battleStatusText, battleTargets, bindProgressionHooks,
 };
 });
 
