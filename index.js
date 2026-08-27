@@ -19,12 +19,15 @@ const __reqMap = {
     "../config": "src/config",
     "../core/schema": "src/core/schema",
     "../core/progression": "src/core/progression",
-    "../util": "src/util"
+    "../util": "src/util",
+    "../core/combat": "src/core/combat"
   },
   "src/commands/combat": {
     "../core/combat": "src/core/combat",
+    "../core/schema": "src/core/schema",
     "../world/quests": "src/world/quests",
-    "../config": "src/config"
+    "../config": "src/config",
+    "../core/progression": "src/core/progression"
   },
   "src/commands/craft": {
     "../crafting/recipes": "src/crafting/recipes",
@@ -34,13 +37,15 @@ const __reqMap = {
     "../core/schema": "src/core/schema",
     "../util": "src/util",
     "../world/loot": "src/world/loot",
-    "../world/zones": "src/world/zones"
+    "../world/zones": "src/world/zones",
+    "../core/progression": "src/core/progression"
   },
   "src/commands/gather": {
     "../world/zones": "src/world/zones",
     "../world/enemies": "src/world/enemies",
     "../core/combat": "src/core/combat",
     "../core/statusEffects": "src/core/statusEffects",
+    "../core/progression": "src/core/progression",
     "../world/quests": "src/world/quests",
     "../util": "src/util"
   },
@@ -76,6 +81,8 @@ const __reqMap = {
   "src/commands/social": {
     "../core/schema": "src/core/schema",
     "../world/enemies": "src/world/enemies",
+    "../core/combat": "src/core/combat",
+    "../world/zones": "src/world/zones",
     "../util": "src/util"
   },
   "src/commands/world": {
@@ -119,7 +126,8 @@ const __reqMap = {
   },
   "src/crafting/recipes": {
     "../core/schema": "src/core/schema",
-    "../util": "src/util"
+    "../util": "src/util",
+    "../core/progression": "src/core/progression"
   },
   "src/world/enemies": {
     "../config": "src/config",
@@ -199,14 +207,19 @@ const handlers = {
     const cls = CLASSES[classId];
     for (const [k, v] of Object.entries(race.statMods)) player.attributes[k] += v;
     player.attributes[cls.primary] += 2;
+    // every class starts with one signature ability
+    const { STARTER_ABILITIES } = require("../core/combat");
+    const starter = STARTER_ABILITIES[classId];
+    if (starter) player.abilities = [starter];
     refreshStats(player);
     player.hp = player.maxHp; player.mp = player.maxMp; player.stamina = player.maxStamina;
 
     return `✨ **CHARACTER CREATED!**\n\n` +
       `**${player.name}** the **${race.name} ${cls.name}**\n` +
       `Role: ${cls.role} | Primary: ${cls.primary.toUpperCase()}\n` +
-      `Racial Perk: ${race.perks.join(", ")}\n\n` +
-      `You have **${player.unspentAttrPoints} attribute points** — spend with \`playrpg attrs <str|dex|con|int|wis|cha> <n>\`\n` +
+      `Racial Perk: ${race.perks.join(", ")}\n` +
+      (starter ? `⚡ Starter skill learned: **${starter}** — try \`playrpg skill ${starter}\` in battle!\n` : "") +
+      `\nYou have **${player.unspentAttrPoints} attribute points** — spend with \`playrpg attrs <str|dex|con|int|wis|cha> <n>\`\n` +
       `Pick a subclass: \`playrpg subclass <name>\` (${SUBCLASSES[classId].join(" | ")})\n` +
       `Set appearance: \`playrpg look <hair|eyes|skin> <value>\``;
   },
@@ -243,6 +256,8 @@ const handlers = {
       `❤️ ${p.hp}/${p.maxHp} 🔷 ${p.mp}/${p.maxMp} ⚡ ${p.stamina}/${p.maxStamina}\n` +
       `⚔️ ATK ${p.atk} | 🔮 MATK ${p.magAtk} | 🛡️ DEF ${p.def} | 💠 MDEF ${p.magDef} | 👟 SPD ${p.speed}\n` +
       `🎯 Crit ${(p.critChance * 100).toFixed(1)}% | 💨 Dodge ${(p.dodge * 100).toFixed(1)}% | 🪙 ${p.gold} gold\n` +
+      (p.activePet ? `🐾 Pet: **${p.activePet}** (Lv ${require("../core/progression").petLevel(p, p.activePet)})\n` : "") +
+      (p.activeMount ? `🐎 Mount: **${p.activeMount}**\n` : "") +
       `Appearance: ${Object.entries(p.appearance).map(([k, v]) => `${k}: ${v}`).join(", ")}`;
   },
 
@@ -337,7 +352,21 @@ const handlers = {
     if (name === "equip" && args[1]) {
       const load = player.loadouts[args[1]];
       if (!load) return "❌ Loadout not found.";
-      player.equipped = JSON.parse(JSON.stringify(load));
+      const { equippedItem, addItem, removeItem } = require("../core/schema");
+      const clean = {};
+      for (const [slot, uid] of Object.entries(load)) {
+        if (uid && equippedItem(player, slot)) clean[slot] = uid;
+      }
+      // return currently-equipped copies to the bag, take loadout copies out
+      for (const [slot, uid] of Object.entries(player.equipped)) {
+        const it = equippedItem(player, slot);
+        if (it && !(clean[slot] === uid)) addItem(player, it.name, 1);
+      }
+      for (const [slot, uid] of Object.entries(clean)) {
+        const it = equippedItem(player, slot);
+        if (it) removeItem(player, it.name, 1);
+      }
+      player.equipped = clean;
       refreshStats(player);
       return `✅ Equipped loadout **${args[1]}**.`;
     }
@@ -354,21 +383,43 @@ __def("src/commands/combat", function (module, exports, require) {
 // commands/combat.js — attack, skill, item, guard, flee, battle.
 // ============================================================
 
-const { getPlayerBattle, playerAction, battleStatusText, ABILITIES, STANCES } = require("../core/combat");
+const { getPlayerBattle, playerAction, battleStatusText, ABILITIES, STANCES, weaponSkillsFor, weaponPassive } = require("../core/combat");
+const { equippedItem } = require("../core/schema");
 const { progressQuest } = require("../world/quests");
 const { ELEMENT_EMOJI } = require("../config");
+
+const REASONS = {
+  not_your_turn: "Not your turn — wait for your party member!",
+  battle_over: "The battle is already over.",
+  no_battle: "No battle! Use `playrpg explore` or `playrpg party hunt`.",
+};
+function _err(result) {
+  return `❌ ${REASONS[result.reason] || result.reason}`;
+}
 
 function _finish(battle, result) {
   let s = "";
   if (result.state === "active") {
     s = battleStatusText(battle);
   } else if (result.result === "victory") {
-    s = `🎉 **VICTORY!**\n\n` +
-      `✨ **${result.xp} XP** | 🪙 **${result.gold} gold**\n` +
-      (result.leveled ? `⬆️ **LEVEL UP!** You are now level **${battle.players[0].level}**!\n` : "") +
-      (result.items.length ? `🎁 Loot:\n${result.items.map(i => ` • ${i}`).join("\n")}\n` : "") +
-      (result.hardcoreWipe ? "" : "") +
-      `\n${result.log.slice(-6).join("\n")}`;
+    if (result.dungeonComplete) {
+      s = `🏰 **DUNGEON COMPLETE!**\n\n` +
+        `✨ **${result.xp} XP** per member | 🪙 **${result.gold} gold**\n` +
+        (result.dungeonBonus ? `🎁 Completion bonus: +${result.dungeonBonus.xp} XP, +${result.dungeonBonus.gold} gold, full rest!\n` : "") +
+        (result.items.length ? `🎁 Loot (stored in inventory):\n${result.items.map(i => ` • ${i}`).join("\n")}\n` : "") +
+        `\n${result.log.slice(-6).join("\n")}`;
+    } else if (result.dungeonContinue) {
+      s = `🏰 **FLOOR ${result.dungeonFloor - 1} CLEARED!** (${result.battle.players.length} members, +${result.xp} XP each)\n\n` +
+        (result.items.length ? `🎁 Loot:\n${result.items.map(i => ` • ${i}`).join("\n")}\n\n` : "") +
+        `⬇️ Descending to floor ${result.dungeonFloor}...\n\n${result.battle.log[0]}\n\nKeep attacking: \`playrpg attack\``;
+    } else {
+      s = `🎉 **VICTORY!**\n\n` +
+        `✨ **${result.xp} XP** | 🪙 **${result.gold} gold**\n` +
+        (result.currencies ? `💠 Currencies: ${Object.entries(result.currencies).map(([k, v]) => `${k} +${v}`).join(", ")}\n` : "") +
+        (result.leveled ? `⬆️ **LEVEL UP!**\n` : "") +
+        (result.items.length ? `🎁 Loot (stored in inventory):\n${result.items.map(i => ` • ${i}`).join("\n")}\n` : "") +
+        `\n${result.log.slice(-6).join("\n")}`;
+    }
   } else if (result.result === "defeat") {
     s = `💀 **DEFEAT!**\n` +
       (result.goldPenalty ? `You lost **${result.goldPenalty} gold** (5% death penalty).\n` : "") +
@@ -381,16 +432,13 @@ function _finish(battle, result) {
 }
 
 function _afterPlayerAction(battle, result, player) {
-  // quest progress hooks
-  if (result.result === "victory") {
+  // quest progress hooks — all party members get kill credit
+  if (result.result === "victory" || result.dungeonFloor) {
     const enemy = result.battle?.enemy || battle?.enemy;
     if (enemy) {
-      const updates = progressQuest(player, { type: "kill", target: enemy.templateId, family: enemy.family, amount: 1 });
-      if (enemy.boss) progressQuest(player, { type: "defeat_boss", target: String(enemy.zoneId), zoneId: enemy.zoneId, amount: 1 });
-      // gather/loot quest progress
-      for (const item of result.items || []) {
-        const name = item.replace(/\*\*/g, "").split(" [")[0];
-        progressQuest(player, { type: "collect", target: name, amount: 1 });
+      for (const member of (result.battle?.players || [player])) {
+        const updates = progressQuest(member, { type: "kill", target: enemy.templateId, family: enemy.family, amount: 1 });
+        if (enemy.boss) progressQuest(member, { type: "defeat_boss", target: String(enemy.zoneId), zoneId: enemy.zoneId, amount: 1 });
       }
     }
   }
@@ -402,7 +450,7 @@ const handlers = {
     const battle = getPlayerBattle(player.id);
     if (!battle) return "❌ No battle! Use `playrpg explore` to find enemies.";
     const result = playerAction(battle, player, "attack");
-    if (result.ok === false) return `❌ ${result.reason}`;
+    if (result.ok === false) return _err(result);
     return _afterPlayerAction(battle, result, player);
   },
 
@@ -412,15 +460,33 @@ const handlers = {
     const skillId = (args[0] || "").toLowerCase();
     if (!skillId) {
       const known = (player.abilities || []).map(id => ABILITIES[id]).filter(Boolean);
-      if (!known.length) return "❌ You haven't learned any skills. Check `playrpg talents` for ability unlocks.";
-      return `⚡ **YOUR SKILLS:**\n` + known.map(a => `• **${a.name}** (\`${a.id}\`) ${a.emoji} — ${a.desc}`).join("\n");
+      const weaponSkills = weaponSkillsFor(player);
+      if (!known.length && !weaponSkills.length) return "❌ You haven't learned any skills. Check `playrpg talents` for ability unlocks.";
+      let s = `⚡ **YOUR SKILLS:**\n`;
+      if (known.length) s += `\n**Class:**\n` + known.map(a => `• **${a.name}** (\`${a.id}\`) ${a.emoji} — ${a.desc}`).join("\n");
+      if (weaponSkills.length) { const w = equippedItem(player, "weapon"); s += `\n**Weapon (${w?.name || w?.type}):**\n` + weaponSkills.map(a => `• **${a.name}** (\`${a.id}\`) ${a.emoji} — ${a.desc}`).join("\n"); }
+      const wp = weaponPassive(player);
+      if (wp) s += `\n\n🔮 Weapon passive: **${wp.name}** — ${wp.desc}`;
+      return s;
     }
     const result = playerAction(battle, player, "skill", { skillId });
     if (result.ok === false) {
-      const reasons = { unknown_skill: "Unknown skill.", not_learned: "You haven't learned that skill.", insufficient_resource: "Not enough MP/stamina!", on_cooldown: "That skill is on cooldown!" };
+      const reasons = { unknown_skill: "Unknown skill.", not_learned: "You haven't learned that skill (or it doesn't match your weapon).", insufficient_resource: "Not enough MP/stamina!", on_cooldown: "That skill is on cooldown!", not_your_turn: "Not your turn — wait for your party member!" };
       return `❌ ${reasons[result.reason] || result.reason}`;
     }
     return _afterPlayerAction(battle, result, player);
+  },
+
+  weapon(message, args, player) {
+    const w = equippedItem(player, "weapon");
+    if (!w) return "❌ No weapon equipped. Craft or loot one, then `playrpg equip <name>`.";
+    const wp = weaponPassive(player);
+    const skills = weaponSkillsFor(player);
+    let s = `⚔️ **${w.name}** [${w.rarityName}] (${w.type})\n`;
+    if (wp) s += `🔮 Passive: **${wp.name}** — ${wp.desc}\n`;
+    if (skills.length) s += `\n⚡ **Weapon skills:**\n` + skills.map(a => `• **${a.name}** (\`${a.id}\`) — ${a.desc}`).join("\n");
+    s += `\n\nMastery: ${require("../core/progression").masteryRank(player, w.type)} (${require("../core/progression").getMastery(player, w.type)} pts)`;
+    return s;
   },
 
   item(message, args, player) {
@@ -440,7 +506,7 @@ const handlers = {
     const battle = getPlayerBattle(player.id);
     if (!battle) return "❌ No battle!";
     const result = playerAction(battle, player, "guard");
-    if (result.ok === false) return `❌ ${result.reason}`;
+    if (result.ok === false) return _err(result);
     return _finish(battle, result);
   },
 
@@ -448,7 +514,7 @@ const handlers = {
     const battle = getPlayerBattle(player.id);
     if (!battle) return "❌ No battle!";
     const result = playerAction(battle, player, "flee");
-    if (result.ok === false) return `❌ ${result.reason}`;
+    if (result.ok === false) return _err(result);
     return _finish(battle, result);
   },
 
@@ -509,7 +575,7 @@ const handlers = {
     }
     if (battle) {
       const result = playerAction(battle, player, "stance", { stanceId });
-      if (result.ok === false) return `❌ ${result.reason}`;
+      if (result.ok === false) return _err(result);
       return _finish(battle, result);
     }
     player.stance = stanceId;
@@ -627,8 +693,8 @@ __def("src/commands/economy", function (module, exports, require) {
 // bank, treasure, use items.
 // ============================================================
 
-const { players, refreshStats } = require("../core/schema");
-const { pick, randInt, chance, seededRng, hashSeed } = require("../util");
+const { players, refreshStats, getItemObject, setItemObject, addItemObject, addItem, countItem, equippedItem, equipByName, unequipSlot, getInstancesByName, countInstancesByName, removeWorstInstance } = require("../core/schema");
+const { pick, randInt, chance, seededRng, hashSeed, cap } = require("../util");
 const { generateItem, itemSummary, itemDetailed, generateTreasureMap } = require("../world/loot");
 const { getZone } = require("../world/zones");
 
@@ -657,51 +723,121 @@ const SHOP_ITEMS = [
 const handlers = {
   inventory(message, args, player) {
     const entries = Object.entries(player.inventory).sort((a, b) => b[1] - a[1]);
-    if (!entries.length) return "🎒 **Inventory is empty.** Go gather or hunt!";
-    const page = parseInt(args[0]) || 1;
-    const perPage = 15;
-    const pages = Math.max(1, Math.ceil(entries.length / perPage));
-    const slice = entries.slice((page - 1) * perPage, page * perPage);
-    let s = `🎒 **INVENTORY (page ${page}/${pages})** — ${entries.length} item types\n\n`;
-    for (const [name, qty] of slice) s += `• **${name}** x${qty}\n`;
-    s += `\n🪙 ${player.gold} gold | 📦 Storage: ${Object.keys(player.storageItems).length} items`;
+    let s = `🎒 **INVENTORY** — ${entries.length} item types\n\n`;
+
+    // real gear first: one line per unique piece (best rarity shown, count includes equipped)
+    const gearNames = [...new Set((player.itemInstances || []).map(i => i.name))].sort();
+    if (gearNames.length) {
+      s += `**⚔️ GEAR**\n`;
+      for (const gname of gearNames) {
+        const g = getItemObject(player, gname); // best instance
+        const n = countInstancesByName(player, gname);
+        const equipped = Object.values(player.equipped || {}).some(uid => uid && (player.itemInstances || []).some(i => i.uid === uid && i.name === gname));
+        s += `• **${gname}** [${g.rarityName}]${n > 1 ? ` x${n}` : ""}${equipped ? " ✅ equipped" : ""} — ${itemSummary(g).replace(/\*\*/g, "")}\n`;
+      }
+      s += `\n`;
+    }
+
+    // materials + consumables (counts only, no identity)
+    const stackNames = new Set(gearNames);
+    const stacks = entries.filter(([name]) => !stackNames.has(name));
+    if (stacks.length) {
+      s += `**📦 MATERIALS & GOODS**\n`;
+      const page = parseInt(args[0]) || 1;
+      const perPage = 20;
+      const pages = Math.max(1, Math.ceil(stacks.length / perPage));
+      const slice = stacks.slice((page - 1) * perPage, page * perPage);
+      for (const [name, qty] of slice) s += `• **${name}** x${qty}\n`;
+      if (pages > 1) s += `(page ${page}/${pages} — \`playrpg inventory <page>\`)\n`;
+    }
+
+    s += `\n🪙 ${player.gold} gold | 💎 ${player.currencies?.gems || 0} gems | 🎫 ${player.currencies?.tokens || 0} tokens\n`;
+    s += `Equip gear: \`playrpg equip <item>\` (best copy) | Inspect: \`playrpg iteminfo <item>\``;
+    return s;
+  },
+
+  iteminfo(message, args, player) {
+    const name = args.join(" ");
+    if (!name) return "❌ `playrpg iteminfo <item name>`";
+    const copies = getInstancesByName(player, name);
+    if (!copies.length) return `❌ No detailed item named **${name}**. It's a stackable good (no rarity/affixes).`;
+    const equipped = Object.values(player.equipped || {}).filter(uid => uid && copies.some(i => i.uid === uid));
+    let s = copies.map((c, idx) => `**#${idx + 1} ${c.name}** [${c.rarityName}]${c.cursed ? " ☠️" : ""}${c.set ? ` (${c.set.name})` : ""}${equipped.includes(c.uid) ? " ✅ equipped" : ""}\n${itemDetailed(c)}`).join("\n\n");
+    s += `\n\nEquip: \`playrpg equip ${name}\``;
     return s;
   },
 
   equip(message, args, player) {
     const name = args.join(" ");
-    if (!name) return "❌ Equip what? `playrpg equip <item name>` (weapon/armor/ring/amulet...)";
-    if ((player.inventory[name] || 0) <= 0) return `❌ You don't have **${name}**.`;
-    // try to find an existing generated item in inventory meta
-    if (!player._items) player._items = {};
-    let item = player._items[name];
-    if (!item) {
-      // Heuristic slot from name
-      const lower = name.toLowerCase();
-      const slot = /sword|axe|hammer|dagger|staff|bow|spear|mace|wand|rapier/.test(lower) ? "weapon"
-        : /helm|hood|cap|mask/.test(lower) ? "helm"
-        : /boots|shoes|sandals/.test(lower) ? "boots"
-        : /gloves|gauntlets|hand/.test(lower) ? "gloves"
-        : /amulet|necklace|pendant/.test(lower) ? "amulet"
-        : /ring/.test(lower) ? "ring1"
-        : /shield|orb|tome|book/.test(lower) ? "offhand"
-        : /armor|robe|plate|chest|mail|cloak|leather|tunic/.test(lower) ? "armor"
-        : "relic";
-      item = generateItem(name, { slot, tier: Math.max(1, Math.ceil(player.zone / 10)), level: player.level });
-      item.name = name;
-      player._items[name] = item;
+    if (!name) return "❌ Equip what? `playrpg equip <item name>` (weapon/armor/helm/boots/gloves/amulet/ring/offhand)";
+    if ((player.inventory[name] || 0) <= 0 && !getInstancesByName(player, name).length) return `❌ You don't have **${name}**.`;
+    // use the real stored instances; equip picks the BEST copy (e.g. Rare over Common)
+    let res = equipByName(player, name);
+    if (!res.ok || !res.instance) {
+      // never looted as gear -> create one instance from the name heuristic
+      if (res.reason === "no_instance") {
+        const lower = name.toLowerCase();
+        const slot = /sword|axe|hammer|dagger|staff|bow|spear|mace|wand|rapier/.test(lower) ? "weapon"
+          : /helm|hood|cap|mask/.test(lower) ? "helm"
+          : /boots|shoes|sandals/.test(lower) ? "boots"
+          : /gloves|gauntlets|hand/.test(lower) ? "gloves"
+          : /amulet|necklace|pendant/.test(lower) ? "amulet"
+          : /ring/.test(lower) ? "ring1"
+          : /shield|orb|tome|book/.test(lower) ? "offhand"
+          : /armor|robe|plate|chest|mail|cloak|leather|tunic/.test(lower) ? "armor"
+          : null;
+        if (!slot) return `❌ **${name}** isn't equippable gear.`;
+        const item = generateItem(name, { slot, tier: Math.max(1, Math.ceil(player.zone / 10)), level: player.level });
+        item.name = name;
+        const inst = addItemObject(player, item, 1); // creates the instance + count
+        if (!inst) return `❌ **${name}** isn't equippable gear.`;
+        res = equipByName(player, name);
+      }
+      if (!res.ok) {
+        const reasons = { already_equipped: "Already equipped!", bad_slot: "Can't equip that in any slot." };
+        return `❌ ${reasons[res.reason] || res.reason}`;
+      }
     }
-    const targetSlot = item.slot === "ring" ? (player.equipped.ring1 ? "ring2" : "ring1") : item.slot;
-    // unequip old
-    if (player.equipped[targetSlot]) {
-      const old = player.equipped[targetSlot];
-      player.inventory[old.name] = (player.inventory[old.name] || 0) + 1;
-    }
-    player.inventory[name] -= 1;
-    if (player.inventory[name] <= 0) delete player.inventory[name];
-    player.equipped[targetSlot] = item;
     refreshStats(player);
-    return `✅ Equipped **${name}** (${item.rarityName}).\n${itemSummary(item)}`;
+    const it = res.instance;
+    return `✅ Equipped **${it.name}** [${it.rarityName}]${it.set ? ` (${it.set.name} set)` : ""}${it.cursed ? " ☠️ cursed" : ""} (best copy of ${countInstancesByName(player, it.name) + 1} total).\n${itemSummary(it)}`;
+  },
+
+  // ---- PETS & MOUNTS (usable companions) ----------------------
+  pet(message, args, player) {
+    const name = args.join(" ");
+    const PET_BONUSES = {
+      "Wolf Cub": { bonus: "loot", desc: "+10% loot luck" },
+      "Baby Dragon": { bonus: "atk", desc: "+5 ATK" },
+      "Fox Kitten": { bonus: "luck", desc: "+5% treasure luck" },
+    };
+    if (!name) {
+      const list = player.pets || [];
+      return `🐾 **PETS**\n${list.length ? list.map(n => `• **${n}** ${player.activePet === n ? "✅ active" : ""} (Lv ${require("../core/progression").petLevel(player, n)})`).join("\n") : "none yet — craft one: `playrpg recipes pet`"}\nSummon: \`playrpg pet <name>\``;
+    }
+    if ((player.inventory[name] || 0) <= 0) return `❌ You don't have **${name}**. Craft one: \`playrpg craft do <id>\` (wolf_cub, baby_dragon, fox_kitten)`;
+    const info = PET_BONUSES[name] || { bonus: "none", desc: "a friendly companion" };
+    player.activePet = name;
+    if (!player.pets) player.pets = [];
+    if (!player.pets.includes(name)) player.pets.push(name);
+    player.petAtkBonus = info.bonus === "atk" ? 5 : 0;
+    player.petLootBonus = info.bonus === "loot" ? 0.1 : 0;
+    player.petTreasureLuck = info.bonus === "luck" ? 0.05 : 0;
+    return `🐾 **${name}** is now your active pet! (${info.desc})\nIt fights alongside you and gains XP from your victories.`;
+  },
+
+  mount(message, args, player) {
+    const name = args.join(" ");
+    if (!name) {
+      const list = player.mounts || [];
+      return `🐎 **MOUNTS**\n${list.length ? list.map(n => `• **${n}** ${player.activeMount === n ? "✅ active" : ""}`).join("\n") : "none yet — craft one: `playrpg craft do riding_horse`"}\nRide: \`playrpg mount <name>\``;
+    }
+    if ((player.inventory[name] || 0) <= 0) return `❌ You don't have **${name}**. Craft one: \`playrpg craft do riding_horse\``;
+    player.activeMount = name;
+    if (!player.mounts) player.mounts = [];
+    if (!player.mounts.includes(name)) player.mounts.push(name);
+    player.mountSpeedBonus = 3;
+    return `🐎 You're now riding **${name}**! (+3 speed in combat, travel discounts on roads)`;
   },
 
   shop(message, args, player) {
@@ -727,12 +863,22 @@ const handlers = {
   sell(message, args, player) {
     const name = args.join(" ");
     if (!name) return "❌ Sell what? `playrpg sell <item> [qty]`";
-    const qty = parseInt(args[args.length - 1]) && isNaN(name) ? parseInt(args[args.length - 1]) : 1;
-    const cleanName = args.slice(0, args.length - (qty > 1 ? 1 : 0)).join(" ") || name;
+    const maybeQty = parseInt(args[args.length - 1]);
+    const qty = Number.isInteger(maybeQty) && maybeQty > 1 ? maybeQty : 1;
+    const cleanName = qty > 1 ? args.slice(0, -1).join(" ") : name;
     const owned = player.inventory[cleanName] || 0;
+    const copies = getInstancesByName(player, cleanName);
     if (owned < qty) return `❌ You only have ${owned}x ${cleanName}.`;
-    const basePrice = cleanName.toLowerCase().includes("ore") ? 8 : cleanName.toLowerCase().includes("log") ? 6 : cleanName.toLowerCase().includes("potion") ? 15 : 4;
-    const earned = basePrice * qty;
+    // gear: sell one instance at a time (worst copy first, keeps your best)
+    let earned = 0;
+    if (copies.length && qty === 1) {
+      const sold = removeWorstInstance(player, cleanName);
+      earned = sold && sold.value ? Math.floor(sold.value * 0.5) : 4;
+    } else {
+      const obj = copies[0];
+      const basePrice = obj && obj.value ? Math.floor(obj.value * 0.5) : cleanName.toLowerCase().includes("ore") ? 8 : cleanName.toLowerCase().includes("log") ? 6 : cleanName.toLowerCase().includes("potion") ? 15 : 4;
+      earned = basePrice * qty;
+    }
     player.inventory[cleanName] -= qty;
     if (player.inventory[cleanName] <= 0) delete player.inventory[cleanName];
     player.gold += earned;
@@ -776,11 +922,12 @@ const handlers = {
     // 60% chance to find it
     if (Math.random() < 0.6) {
       const tier = Math.ceil(player.zone / 10);
-      const loot = require("../world/loot").rollLoot({ tier, level: player.level, boss: false, playerLevel: player.level, lootMult: player.statMultipliers.loot + (player.perkBonuses?.treasureLuck || 0) });
-      for (const it of loot.items) player.inventory[it.name] = (player.inventory[it.name] || 0) + 1;
+      const luck = (player.perkBonuses?.treasureLuck || 0) + (player.petTreasureLuck || 0);
+      const loot = require("../world/loot").rollLoot({ tier, level: player.level, boss: false, playerLevel: player.level, lootMult: player.statMultipliers.loot + luck });
+      for (const it of loot.items) addItemObject(player, it);
       player.gold += loot.gold;
       delete player.treasureMap;
-      return `💎 **TREASURE FOUND!**\n${loot.items.map(itemSummary).join("\n") || "Just gold this time."}\n+**${loot.gold} gold**`;
+      return `💎 **TREASURE FOUND!**\n${loot.items.map(itemSummary).join("\n") || "Just gold this time."}\n+**${loot.gold} gold** (stored in inventory)`;
     }
     return "🕳️ You dig... nothing yet. Try again (`playrpg treasure dig`).";
   },
@@ -971,6 +1118,7 @@ const { getZone, pickGatherable } = require("../world/zones");
 const { getEnemyForZone, enemyIntro } = require("../world/enemies");
 const { startEncounter, getPlayerBattle, battleStatusText } = require("../core/combat");
 const { applyStatus } = require("../core/statusEffects");
+const { gainSkillXp, skillProgressText } = require("../core/progression");
 const { progressQuest } = require("../world/quests");
 const { randInt } = require("../util");
 const { cap } = require("../util");
@@ -985,7 +1133,6 @@ function _doGather(player, skillKey, zoneSkillKey, verbEmoji, verb) {
   let amount = Math.floor(Math.random() * 3) + 1;
   if (Math.random() < 0.05 + skillLvl * 0.002 + yieldBonus) amount += randInt(1, 3);
   player.inventory[mat] = (player.inventory[mat] || 0) + amount;
-  player.skills[skillKey] += 1;
 
   const rare = Math.random() < 0.08 + skillLvl * 0.001;
   let extra = "";
@@ -995,12 +1142,18 @@ function _doGather(player, skillKey, zoneSkillKey, verbEmoji, verb) {
     extra = `\n✨ Bonus find: **1x ${bonus}**!`;
   }
 
+  // XP-based skill leveling: higher-tier zones grant more XP per action
+  const tier = Math.ceil(player.zone / 10);
+  const xp = 6 + tier * 3 + (rare ? 5 : 0) + randInt(0, 2);
+  const prog = gainSkillXp(player, "skill", skillKey, xp);
+  const levelUp = prog.leveled ? ` ⬆️ **LEVEL UP!**` : "";
+
   const updates = progressQuest(player, { type: skillKey === "fishing" ? "fish" : skillKey === "mining" ? "mine" : skillKey === "woodcutting" ? "chop" : "gather", target: mat, amount });
   const qProg = updates.length ? `\n📋 ${updates.map(u => `**${u.quest.title}** ${u.complete ? "✅" : ""}`).join(", ")}` : "";
 
   return `${verbEmoji} **${verb.toUpperCase()} SUCCESSFUL!** (${zone.name})\n` +
-    `You gathered **${amount}x ${mat}**.\n` +
-    `Skill: ${cap(skillKey)} Lvl ${skillLvl} → **${skillLvl + 1}**${extra}${qProg}`;
+    `You gathered **${amount}x ${mat}** (+${xp} XP).\n` +
+    `Skill: ${cap(skillKey)} ${skillProgressText(player, "skill", skillKey)}${levelUp}${extra}${qProg}`;
 }
 
 const handlers = {
@@ -1013,9 +1166,10 @@ const handlers = {
     const crop = crops[Math.floor(Math.random() * crops.length)];
     const amount = randInt(1, 4);
     player.inventory[crop] = (player.inventory[crop] || 0) + amount;
-    player.skills.farming = (player.skills.farming || 1) + 1;
+    const tier = Math.ceil(player.zone / 10);
+    const prog = gainSkillXp(player, "skill", "farming", 5 + tier * 2 + randInt(0, 2));
     progressQuest(player, { type: "farm", target: crop, amount });
-    return `🌾 **FARMING!** You harvested **${amount}x ${crop}**. Farming Lvl ${player.skills.farming}`;
+    return `🌾 **FARMING!** You harvested **${amount}x ${crop}** (+${prog.gained} XP). Farming ${skillProgressText(player, "skill", "farming")}${prog.leveled ? " ⬆️ **LEVEL UP!**" : ""}`;
   },
 
   // trap: the old pelt-gathering action
@@ -1077,6 +1231,7 @@ const ALIASES = {
   guild: ["g"], bank: ["vault"], top: ["leaderboard", "lb"], bestiary: ["codex2"],
   stance: ["st"], auction: ["ah"], rotatingshop: ["rot"], traveling: ["merchant", "traveler"],
   currencies: ["cur"], features: ["catalog"], ranks: ["rank"], pvp: ["duel"],
+  pet: ["companion"], mount: ["ride"],
 };
 
 for (const mod of MODULES) {
@@ -1159,7 +1314,8 @@ const handlers = {
       `**Gathering & Hunt** — \`playrpg mine\` \`chop\` \`fish\` \`forage\` \`farm\` \`trap\` | \`playrpg hunt\` — track and FIGHT enemies\n` +
       `**Crafting** — \`playrpg recipes <page>\` | \`playrpg recipes food <page>\` | \`playrpg recipes craft <page>\` | \`playrpg craft do <id>\` | \`playrpg discover\` | \`playrpg enchant\` | \`playrpg refine\`\n` +
       `**Quests** — \`playrpg quests\` | \`quests daily\` | \`weekly\` | \`monthly\` | \`bounty\` | \`main\` | \`quest accept <id>\` | \`quest answer <text>\` | \`quest choose <a|b>\`\n` +
-      `**Economy** — \`playrpg inventory\` | \`equip <item>\` | \`shop\` | \`buy <item>\` | \`sell <item>\` | \`bank\` | \`currencies\` | \`auction\` | \`rotatingshop\` | \`secretshop\` | \`traveling\` | \`treasure\` | \`dig\` | \`use <item>\`\n` +
+      `**Economy** — \`playrpg inventory\` | \`equip <item>\` | \`iteminfo <item>\` | \`shop\` | \`buy <item>\` | \`sell <item>\` | \`bank\` | \`currencies\` | \`auction\` | \`rotatingshop\` | \`secretshop\` | \`traveling\` | \`treasure\` | \`dig\` | \`use <item>\`\n` +
+      `**Companions** — \`playrpg pet <name>\` (Wolf Cub, Baby Dragon...) | \`mount <name>\` (Riding Horse...) — craftable & they buff you\n` +
       `**Social** — \`playrpg party\` | \`guild\` | \`faction\` | \`friend\` | \`playrpg pvp @user [wager]\` — player duels\n` +
       `**Meta** — \`playrpg profile\` | \`stats\` | \`ranks\` | \`features\` | \`feature <name>\` | \`achievements\` | \`bestiary\` | \`codex\` | \`settings\` | \`top\``;
   },
@@ -1511,6 +1667,9 @@ __def("src/commands/social", function (module, exports, require) {
 
 const { createParty, getParty, createGuild, getGuild, players } = require("../core/schema");
 const { getEnemyFactions } = require("../world/enemies");
+const { startPartyEncounter, getPlayerBattle, battleStatusText } = require("../core/combat");
+const { getZone } = require("../world/zones");
+const { enemyIntro } = require("../world/enemies");
 const { cap } = require("../util");
 
 const handlers = {
@@ -1555,12 +1714,52 @@ const handlers = {
       }
       return `👋 You left the party. (${party.members.length} members remain)`;
     }
+    if (action === "hunt" || action === "dungeon") {
+      const party = getParty(player);
+      if (!party) return "❌ Create a party first: `playrpg party create` (members join with `party join @leader`).";
+      if (party.members.length < 2) return "❌ You need at least 2 members in the zone to hunt together. Invite: `playrpg party invite @user`";
+      const existing = getPlayerBattle(player.id);
+      if (existing) return `⚔️ Already fighting!\n\n${battleStatusText(existing)}`;
+      // only members in the same zone join the fight
+      const zoneId = player.zone;
+      const inZone = party.members.filter(m => m.zone === zoneId);
+      if (inZone.length < 2) return `❌ Only ${inZone.length} member(s) are in your zone (${getZone(zoneId).name}). Everyone must travel there first: \`playrpg travel ${zoneId}\``;
+      const zone = getZone(zoneId);
+
+      if (action === "hunt") {
+        const elite = (args[1] || "").toLowerCase() === "elite";
+        const res = startPartyEncounter(party, { zoneId, elite });
+        if (!res.ok) return `❌ ${res.reason === "member_in_battle" ? `${res.member} is already in a battle!` : res.reason}`;
+        const b = res.battle;
+        let s = `👥 **PARTY HUNT!** ${b.players.length} adventurers track a **${b.enemy.name}** in ${zone.name}.\n\n`;
+        s += `${enemyIntro(b.enemy)}\n\n`;
+        s += `Members: ${b.players.map(p => `**${p.name}**`).join(", ")}\n`;
+        s += `Turn order: ${b.players.map(p => p.name).join(" → ")} → enemy\n\n`;
+        s += `Actions: \`playrpg attack\` (each member takes their turn) | \`skill <id>\` | \`item <name>\` | \`guard\` | \`flee\``;
+        return s;
+      }
+
+      // dungeon
+      const tier = zone.tier;
+      const totalFloors = Math.min(5, 2 + Math.ceil(tier / 25));
+      const bossFloor = Math.max(2, totalFloors);
+      party.dungeon = { zoneId, floor: 0, totalFloors, bossFloor };
+      const res = startPartyEncounter(party, { zoneId, dungeon: { ...party.dungeon, floor: 0 } });
+      if (!res.ok) return `❌ ${res.reason === "member_in_battle" ? `${res.member} is already in a battle!` : res.reason}`;
+      const b = res.battle;
+      b.dungeon.floor = 1;
+      return `🏰 **PARTY DUNGEON: ${zone.dungeon?.name || zone.name} Vault**\n${totalFloors} floors — boss on floor ${bossFloor}.\n\n${enemyIntro(b.enemy)}\n\nMembers: ${b.players.map(p => `**${p.name}**`).join(", ")}\nKeep attacking: \`playrpg attack\` — floors auto-advance!`;
+    }
     if (action === "status" || !action) {
       if (!player.partyId) return "👥 Not in a party. `playrpg party create` to start one.";
       const party = getParty(player);
-      return `👥 **${party.members[0].name}'s Party** (${party.members.length}/4)\n` +
-        party.members.map(m => `• ${m.id === party.leader ? "👑 " : ""}**${m.name}** Lv ${m.level} ${m.class !== "none" ? cap(m.class) : ""}`).join("\n") +
-        `\n\nLoot mode: ${party.lootMode} | \`playrpg party leave\``;
+      const battle = getPlayerBattle(player.id);
+      let s = `👥 **${party.members[0].name}'s Party** (${party.members.length}/4)\n` +
+        party.members.map(m => `• ${m.id === party.leader ? "👑 " : ""}**${m.name}** Lv ${m.level} ${m.class !== "none" ? cap(m.class) : ""} ${m.zone ? `📍 ${m.zone}` : ""}`).join("\n");
+      if (party.dungeon) s += `\n\n🏰 Dungeon run: floor ${party.dungeon.floor}/${party.dungeon.totalFloors} (${getZone(party.dungeon.zoneId).name})`;
+      if (battle) s += `\n\n⚔️ In combat! ${battleStatusText(battle)}`;
+      s += `\n\nParty actions: \`party hunt\` | \`party dungeon\` | \`party leave\` | \`party status\``;
+      return s;
     }
     return "❌ Actions: create | invite @user | join @leader | leave | status";
   },
@@ -1932,10 +2131,19 @@ __def("src/core/combat", function (module, exports, require) {
 
 const { ELEMENT_EMOJI, DIFFICULTY_MULT } = require("../config");
 const { randInt, chance, clamp, pick, fmt, d } = require("../util");
-const { activeBattles, addExp } = require("./schema");
+const { activeBattles, addExp, addItemObject, equippedItem } = require("./schema");
 const { applyStatus, tickStatuses, hasStatus, removeStatus, getEffectiveStats } = require("./statusEffects");
 const { createEnemyInstance, getBossForZone, enemyIntro } = require("../world/enemies");
 const { rollLoot, itemSummary } = require("../world/loot");
+
+// One signature ability per class, learned FREE at character creation so
+// every new hero can use skills from level 1.
+const STARTER_ABILITIES = {
+  warrior: "whirlwind", mage: "fireball", rogue: "backstab", ranger: "aimed_shot",
+  cleric: "heal", paladin: "smite", druid: "moonfire", bard: "healing_melody",
+  monk: "flurry", necromancer: "bone_spear", sorcerer: "arcane_surge",
+  warden: "taunting_roar", alchemist: "acid_flask", shaman: "lightning_bolt",
+};
 
 // ---- player abilities (2 per class + 1 ultimate each) ----------
 const ABILITIES = {
@@ -2002,6 +2210,75 @@ const ULTIMATES = {
 };
 Object.assign(ABILITIES, ULTIMATES);
 
+// ---- WEAPON SKILLS (2 per weapon family — usable when equipped) ----
+const WEAPON_SKILLS = {
+  // sword
+  blade_fury:        { id: "blade_fury",        name: "Blade Fury",        weaponTypes: ["sword"],     cost: { stamina: 15 }, power: 1.3, element: "physical", kind: "damage", area: true, cooldown: 3, emoji: "⚔️", desc: "A sweeping slash that hits all foes." },
+  rending_slash:     { id: "rending_slash",     name: "Rending Slash",     weaponTypes: ["sword"],     cost: { stamina: 12 }, power: 1.0, element: "physical", kind: "damage", statusId: "bleed", statusChance: 0.7, cooldown: 2, emoji: "🩸", desc: "A deep cut that bleeds the target." },
+  // axe
+  cleave:            { id: "cleave",            name: "Cleave",            weaponTypes: ["axe"],       cost: { stamina: 16 }, power: 1.4, element: "physical", kind: "damage", area: true, cooldown: 3, emoji: "🪓", desc: "Hack through everything in front of you." },
+  executioners_swing:{ id: "executioners_swing", name: "Executioner's Swing", weaponTypes: ["axe"],   cost: { stamina: 18 }, power: 1.6, element: "physical", kind: "damage", execute: true, cooldown: 4, emoji: "⚖️", desc: "A finishing swing — extra damage on low-HP foes." },
+  // hammer
+  seismic_slam:      { id: "seismic_slam",      name: "Seismic Slam",      weaponTypes: ["hammer"],    cost: { stamina: 20 }, power: 1.2, element: "earth", kind: "damage", statusId: "stun", statusChance: 0.6, cooldown: 4, emoji: "🌋", desc: "Slam the ground, stunning the target." },
+  crushing_blow:     { id: "crushing_blow",     name: "Crushing Blow",     weaponTypes: ["hammer"],    cost: { stamina: 14 }, power: 1.1, element: "physical", kind: "damage", statusId: "armor_break", statusChance: 0.8, cooldown: 3, emoji: "💥", desc: "Shatter armor with a massive blow." },
+  // dagger
+  quick_stab:        { id: "quick_stab",        name: "Quick Stab",        weaponTypes: ["dagger"],    cost: { stamina: 8 },  power: 0.8, element: "physical", kind: "damage", critBonus: 0.1, cooldown: 1, emoji: "🗡️", desc: "A fast, cheap, crit-hungry stab." },
+  kidney_shot:       { id: "kidney_shot",       name: "Kidney Shot",       weaponTypes: ["dagger"],    cost: { stamina: 14 }, power: 0.9, element: "physical", kind: "damage", statusId: "stun", statusChance: 0.5, cooldown: 3, emoji: "🩻", desc: "A precise strike that stuns." },
+  // staff
+  arcane_strike:     { id: "arcane_strike",     name: "Arcane Strike",     weaponTypes: ["staff"],     cost: { mp: 15 },     power: 1.2, element: "arcane", kind: "damage", cooldown: 2, emoji: "🔮", desc: "Channel arcane power into a melee strike." },
+  staff_whirl:       { id: "staff_whirl",       name: "Staff Whirl",       weaponTypes: ["staff"],     cost: { mp: 12 },     power: 1.0, element: "wind", kind: "damage", area: true, cooldown: 2, emoji: "🌪️", desc: "Spin your staff, striking all around." },
+  // wand
+  focus_bolt:        { id: "focus_bolt",        name: "Focus Bolt",        weaponTypes: ["wand"],      cost: { mp: 10 },     power: 1.0, element: "arcane", kind: "damage", cooldown: 1, emoji: "✨", desc: "A cheap, reliable bolt of focused magic." },
+  wand_barrage:      { id: "wand_barrage",      name: "Wand Barrage",      weaponTypes: ["wand"],      cost: { mp: 16 },     power: 0.7, element: "arcane", kind: "damage", hits: 3, cooldown: 3, emoji: "🎆", desc: "Fire three quick bolts in succession." },
+  // bow
+  rapid_fire:        { id: "rapid_fire",        name: "Rapid Fire",        weaponTypes: ["bow"],       cost: { stamina: 16 }, power: 0.7, element: "physical", kind: "damage", hits: 3, cooldown: 3, emoji: "🏹", desc: "Three arrows in quick succession." },
+  pinning_shot:      { id: "pinning_shot",      name: "Pinning Shot",      weaponTypes: ["bow"],       cost: { stamina: 12 }, power: 1.0, element: "physical", kind: "damage", statusId: "root", statusChance: 0.7, cooldown: 3, emoji: "🪢", desc: "Root the target to the ground." },
+  // crossbow
+  armor_piercing_bolt: { id: "armor_piercing_bolt", name: "Armor-Piercing Bolt", weaponTypes: ["crossbow"], cost: { stamina: 14 }, power: 1.3, element: "physical", kind: "damage", piercing: 0.5, cooldown: 3, emoji: "🎯", desc: "A bolt that ignores half of the target's DEF." },
+  point_blank:       { id: "point_blank",       name: "Point-Blank Shot",  weaponTypes: ["crossbow"],  cost: { stamina: 12 }, power: 1.2, element: "physical", kind: "damage", critBonus: 0.2, cooldown: 2, emoji: "💢", desc: "Fire at close range for a crit-hungry hit." },
+  // spear
+  impale:            { id: "impale",            name: "Impale",            weaponTypes: ["spear"],     cost: { stamina: 15 }, power: 1.2, element: "physical", kind: "damage", piercing: 0.3, statusId: "bleed", statusChance: 0.6, cooldown: 3, emoji: "🔱", desc: "Pierce armor and leave a bleeding wound." },
+  sweeping_strike:   { id: "sweeping_strike",   name: "Sweeping Strike",   weaponTypes: ["spear"],     cost: { stamina: 14 }, power: 1.1, element: "physical", kind: "damage", area: true, cooldown: 3, emoji: "🌊", desc: "A wide arc that strikes all foes." },
+  // mace
+  bash:              { id: "bash",              name: "Bash",              weaponTypes: ["mace"],      cost: { stamina: 12 }, power: 0.9, element: "physical", kind: "damage", statusId: "stun", statusChance: 0.6, cooldown: 3, emoji: "🛡️", desc: "Blunt-force strike that stuns." },
+  righteous_blow:    { id: "righteous_blow",    name: "Righteous Blow",    weaponTypes: ["mace"],      cost: { stamina: 15 }, power: 1.3, element: "light", kind: "damage", cooldown: 2, emoji: "🌟", desc: "A radiant, heavy strike." },
+  // fist
+  iron_palm:         { id: "iron_palm",         name: "Iron Palm",         weaponTypes: ["fist"],      cost: { stamina: 10 }, power: 0.9, element: "physical", kind: "damage", comboBonus: 2, cooldown: 1, emoji: "🖐️", desc: "A quick palm strike that builds 2 combo." },
+  dragon_kick:       { id: "dragon_kick",       name: "Dragon Kick",       weaponTypes: ["fist"],      cost: { stamina: 18 }, power: 1.6, element: "physical", kind: "damage", statusId: "knockback", statusChance: 0.6, cooldown: 4, emoji: "🐉", desc: "A devastating kick that launches the foe." },
+  // rapier
+  lunge:             { id: "lunge",             name: "Lunge",             weaponTypes: ["rapier"],    cost: { stamina: 12 }, power: 1.2, element: "physical", kind: "damage", piercing: 0.2, critBonus: 0.1, cooldown: 2, emoji: "🤺", desc: "A precise lunge that slips past armor." },
+  riposte:           { id: "riposte",           name: "Riposte",           weaponTypes: ["rapier"],    cost: { stamina: 10 }, power: 0.9, element: "physical", kind: "damage", counterWindow: true, cooldown: 2, emoji: "↩️", desc: "Strike and prepare a counterattack window." },
+};
+Object.assign(ABILITIES, WEAPON_SKILLS);
+
+// ---- WEAPON PASSIVES (always active while the weapon is equipped) ----
+const WEAPON_PASSIVES = {
+  sword:     { id: "blade_mastery", name: "Blade Mastery", desc: "+10% crit damage",                            stats: { critDamage: 1.1 } },
+  axe:       { id: "sunder",        name: "Sunder",        desc: "Attacks ignore 10% DEF",                      stats: { piercing: 0.1 } },
+  hammer:    { id: "concussion",    name: "Concussion",    desc: "10% chance to stun on hit",                   proc: { statusId: "stun", chance: 0.1 } },
+  dagger:    { id: "keen_edge",     name: "Keen Edge",     desc: "+3% crit chance",                             stats: { critChance: 0.03 } },
+  staff:     { id: "arcane_focus",  name: "Arcane Focus",  desc: "+10% magic ATK",                              stats: { magAtk: 1.1 } },
+  wand:      { id: "swift_casting", name: "Swift Casting", desc: "+5 speed",                                    stats: { speed: 5 } },
+  bow:       { id: "first_shot",    name: "First Shot",    desc: "+15% crit on the first hit of each battle",   firstHitCrit: 0.15 },
+  crossbow:  { id: "heavy_bolts",   name: "Heavy Bolts",   desc: "Bolts ignore 15% DEF",                        stats: { piercing: 0.15 } },
+  spear:     { id: "reach",         name: "Reach",         desc: "+5% crit dmg, 15% bleed on hit",              stats: { critDamage: 1.05 }, proc: { statusId: "bleed", chance: 0.15 } },
+  mace:      { id: "crushing",      name: "Crushing",      desc: "8% chance to stun on hit",                    proc: { statusId: "stun", chance: 0.08 } },
+  fist:      { id: "flurry",        name: "Flurry",        desc: "Combo builds 2 per landed hit",               doubleCombo: true },
+  rapier:    { id: "fencing",       name: "Fencing",       desc: "+2% crit, 20% bleed on hit",                  stats: { critChance: 0.02 }, proc: { statusId: "bleed", chance: 0.2 } },
+};
+
+function weaponPassive(player) {
+  const type = equippedItem(player, "weapon")?.type;
+  return (type && WEAPON_PASSIVES[type]) || null;
+}
+
+/** Weapon skills available for the player's equipped weapon. */
+function weaponSkillsFor(player) {
+  const type = equippedItem(player, "weapon")?.type;
+  if (!type) return [];
+  return Object.values(WEAPON_SKILLS).filter(s => s.weaponTypes.includes(type));
+}
+
 // ---- stances ----------------------------------------------------
 const STANCES = {
   balanced:  { id: "balanced",  name: "Balanced",  emoji: "⚖️", mod: { atk: 1.0, def: 1.0 }, desc: "No modifiers." },
@@ -2036,12 +2313,23 @@ function _statsFor(e) {
   for (const [k, v] of Object.entries(stance.mod)) {
     if (typeof s[k] === "number") s[k] *= v;
   }
+  if (e.mountSpeedBonus) s.speed += e.mountSpeedBonus;
+  if (e.bloodlust && e.currentHp <= e.maxHp * 0.5) s.atk = Math.floor(s.atk * 1.15);
   return s;
 }
 
 // ---- damage pipeline ------------------------------------------
 function computeHit(attacker, defender, { power = 1, element = "physical", isMagical = false, critBonus = 0, piercing = 0, skill = null }) {
   const a = _statsFor(attacker);
+  // weapon passive stats (offensive, attacker-only)
+  const wp = weaponPassive(attacker);
+  if (wp?.stats) {
+    a.critChance += wp.stats.critChance || 0;
+    a.critDamage *= wp.stats.critDamage || 1;
+    a.magAtk *= wp.stats.magAtk || 1;
+    a.speed += wp.stats.speed || 0;
+    piercing += wp.stats.piercing || 0;
+  }
   const def = _statsFor(defender);
 
   // evasion chain: dodge -> parry -> block
@@ -2050,7 +2338,7 @@ function computeHit(attacker, defender, { power = 1, element = "physical", isMag
   if (chance(def.parry)) { parried = true; mult = 0.5; }
   else if (chance(def.block)) { blocked = true; mult = 0.6; }
 
-  const base = (isMagical ? a.magAtk : a.atk) * power;
+  const base = (isMagical ? a.magAtk : a.atk) * power + (attacker.petAtkBonus || 0);
   const mitigation = (isMagical ? def.magDef : def.def) * (1 - clamp(piercing, 0, 0.9));
   const resist = clamp(defender.resistances?.[element] || 0, 0, 0.9);
   const crit = chance(a.critChance + (critBonus || 0));
@@ -2065,26 +2353,45 @@ function computeHit(attacker, defender, { power = 1, element = "physical", isMag
 }
 
 // ---- battle lifecycle ------------------------------------------
-function startEncounter(player, { zoneId, elite = false, aiEnemy = null }) {
-  if (activeBattles.has(`player_${player.id}`)) return { ok: false, reason: "already_in_battle" };
+function _createBattle(players, { zoneId, elite = false, aiEnemy = null, dungeon = null, partyId = null }) {
   const zone = require("../world/zones").getZone(zoneId);
-  const enemy = aiEnemy || (zone.worldBoss ? getBossForZone(zone, player.level) : createEnemyInstance({ zoneId, playerLevel: player.level, elite }));
-  enemy.difficultyMult = DIFFICULTY_MULT[player.difficulty] || 1;
+  const top = players.reduce((a, b) => (b.level > a.level ? b : a), players[0]);
+  const enemy = aiEnemy || (zone.worldBoss ? getBossForZone(zone, top.level) : createEnemyInstance({ zoneId, playerLevel: top.level, elite }));
+  enemy.difficultyMult = DIFFICULTY_MULT[top.difficulty] || 1;
   const battle = {
     id: `battle_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     zoneId,
     enemy,
-    players: [player],
+    players,
+    turn: players[0].id,
     round: 1,
     state: "active",
     charging: null,       // { playerId, power }
+    dungeon,              // { zoneId, floor, totalFloors, bossFloor } or null
+    partyId,
     log: [enemyIntro(enemy)],
     startedAt: Date.now(),
     difficultyMult: enemy.difficultyMult,
   };
   activeBattles.set(battle.id, battle);
-  activeBattles.set(`player_${player.id}`, battle);
-  return { ok: true, battle };
+  for (const p of players) activeBattles.set(`player_${p.id}`, battle);
+  return battle;
+}
+
+/** Solo encounter (unchanged behaviour for single players). */
+function startEncounter(player, { zoneId, elite = false, aiEnemy = null }) {
+  if (activeBattles.has(`player_${player.id}`)) return { ok: false, reason: "already_in_battle" };
+  return { ok: true, battle: _createBattle([player], { zoneId, elite, aiEnemy }) };
+}
+
+/** PARTY encounter: all members (in the zone) fight the same enemy together. */
+function startPartyEncounter(party, { zoneId, elite = false, dungeon = null }) {
+  const members = party.members.filter(m => m.zone === zoneId);
+  if (!members.length) return { ok: false, reason: "no_members_in_zone" };
+  for (const m of members) {
+    if (activeBattles.has(`player_${m.id}`)) return { ok: false, reason: "member_in_battle", member: m.name };
+  }
+  return { ok: true, battle: _createBattle(members, { zoneId, elite, dungeon, partyId: party.id }) };
 }
 
 function getPlayerBattle(playerId) {
@@ -2093,18 +2400,43 @@ function getPlayerBattle(playerId) {
 
 function _log(battle, line) { battle.log.push(line); }
 
+function _alive(battle) { return battle.players.filter(p => p.hp > 0); }
+function _allDown(battle) { return _alive(battle).length === 0; }
+
+/** Next alive member after `player` (wraps); null if `player` was the last. */
+function _nextMember(battle, player) {
+  const alive = _alive(battle);
+  if (alive.length <= 1) return null;
+  const idx = alive.findIndex(p => p.id === player.id);
+  return alive[(idx + 1) % alive.length];
+}
+
 function _afterTurn(battle, player) {
+  // tick the acting player's own statuses
   const pTick = tickStatuses(player, { isPlayer: true });
-  const eTick = tickStatuses(battle.enemy, { isPlayer: false });
-  for (const l of [...pTick.log, ...eTick.log]) _log(battle, l);
+  for (const l of pTick.log) _log(battle, l);
   player.guarding = false;
-  if (battle.enemy.currentHp <= 0) return endBattle(battle, "victory");
-  if (player.hp <= 0) return endBattle(battle, "defeat");
   for (const k of Object.keys(player.cooldowns || {})) {
     if (player.cooldowns[k] > 0) player.cooldowns[k] -= 1;
   }
   for (const s of battle.enemy.skills) { s.cd = (s.cd || 0) > 0 ? s.cd - 1 : 0; }
-  if (battle.state === "active") enemyTurn(battle, player);
+  if (battle.enemy.currentHp <= 0) return endBattle(battle, "victory");
+  if (battle.players.length > 1) {
+    // party: pass the turn to the next member; enemy acts after everyone
+    const next = _nextMember(battle, player);
+    battle.turn = next ? next.id : null;
+    if (!next) {
+      enemyTurn(battle);
+      battle.turn = _alive(battle)[0]?.id || null;
+      battle.round += 1;
+    }
+  } else {
+    // solo: enemy acts right after you (original behaviour)
+    if (player.hp > 0 && battle.state === "active") enemyTurn(battle);
+    battle.round += 1;
+  }
+  if (battle.enemy.currentHp <= 0) return endBattle(battle, "victory");
+  if (_allDown(battle)) return endBattle(battle, "defeat");
   return battle;
 }
 
@@ -2144,11 +2476,15 @@ function _useSkill(battle, player, ab, opts = {}) {
       _log(battle, `☄️ ${enemy.name} is afflicted by **${ab.statusId.replace(/_/g, " ")}**!`);
     }
   }
+  // weapon skill bonuses
+  if (ab.comboBonus) player.combo = (player.combo || 0) + ab.comboBonus;
+  if (ab.counterWindow) player.counterWindow = true;
   return true;
 }
 
 function playerAction(battle, player, action, { skillId = null, itemName = null, stanceId = null, power = 100 } = {}) {
   if (battle.state !== "active") return { ok: false, reason: "battle_over" };
+  if (battle.players.length > 1 && battle.turn !== player.id) return { ok: false, reason: "not_your_turn" };
   const enemy = battle.enemy;
 
   if (action === "attack") {
@@ -2166,13 +2502,25 @@ function playerAction(battle, player, action, { skillId = null, itemName = null,
       counter = true;
       player.counterWindow = false;
     }
-    const hit = computeHit(player, enemy, { power: powerMult, element: "physical", piercing: player.stance === "berserk" ? 0.15 : 0 });
+    const wp = weaponPassive(player);
+    // bow "First Shot": bonus crit on the first hit of the battle
+    let firstHitCrit = 0;
+    if (wp?.firstHitCrit && !battle.firstHitUsed) {
+      firstHitCrit = wp.firstHitCrit;
+      battle.firstHitUsed = true;
+    }
+    const hit = computeHit(player, enemy, { power: powerMult, element: "physical", piercing: (player.stance === "berserk" ? 0.15 : 0) + (wp?.stats?.piercing || 0), critBonus: firstHitCrit });
     if (!hit.dodged) {
       enemy.currentHp = Math.max(0, enemy.currentHp - hit.damage);
-      if (player.combo !== undefined) player.combo += 1;
+      player.combo += wp?.doubleCombo ? 2 : 1;
     }
     _log(battle, `${counter ? "🔁 **COUNTERATTACK!** " : "🎯 "}${hit.logLine}`);
     if (!hit.dodged && player.combo > 0) _log(battle, `🔗 Combo x${player.combo}`);
+    // weapon passive on-hit proc (concussion, crushing, reach, fencing)
+    if (!hit.dodged && wp?.proc && chance(wp.proc.chance)) {
+      applyStatus(enemy, wp.proc.statusId, { potency: Math.max(1, Math.round(player.magAtk * 0.08)), duration: 2 });
+      _log(battle, `🔮 **${wp.name}** afflicts ${enemy.name} with **${wp.proc.statusId.replace(/_/g, " ")}**!`);
+    }
     // thorns reflection
     if (!hit.dodged && enemy.thorns > 0) {
       const thornsDmg = Math.max(1, Math.round(hit.damage * enemy.thorns));
@@ -2186,7 +2534,7 @@ function playerAction(battle, player, action, { skillId = null, itemName = null,
       _log(battle, `⛓️ **CHAIN ATTACK!** ${chain.logLine}`);
     }
     // dual wield: off-hand weapon proc
-    const oh = player.equipped?.offhand;
+    const oh = equippedItem(player, "offhand");
     if (oh && WEAPON_TYPES.has(oh.type) && chance(0.25) && enemy.currentHp > 0) {
       const ohHit = computeHit(player, enemy, { power: 0.55, element: oh.element || "physical", critBonus: -0.2 });
       if (!ohHit.dodged) enemy.currentHp = Math.max(0, enemy.currentHp - ohHit.damage);
@@ -2236,7 +2584,9 @@ function playerAction(battle, player, action, { skillId = null, itemName = null,
   if (action === "skill") {
     const ab = ABILITIES[skillId];
     if (!ab) return { ok: false, reason: "unknown_skill" };
-    if (!(player.abilities || []).includes(ab.id)) return { ok: false, reason: "not_learned" };
+    const wpType = equippedItem(player, "weapon")?.type;
+    const isWeaponSkill = ab.weaponTypes && wpType && ab.weaponTypes.includes(wpType);
+    if (!(player.abilities || []).includes(ab.id) && !isWeaponSkill) return { ok: false, reason: "not_learned" };
     if ((player.cooldowns[ab.id] || 0) > 0) return { ok: false, reason: "on_cooldown" };
     if (!_payCost(player, ab.cost)) return { ok: false, reason: "insufficient_resource" };
     player.cooldowns[ab.id] = ab.cooldown;
@@ -2269,6 +2619,14 @@ function playerAction(battle, player, action, { skillId = null, itemName = null,
     const chanceToFlee = clamp(0.5 + (player.speed - enemy.speed) / 40, 0.2, 0.9);
     if (chance(chanceToFlee)) {
       _log(battle, `💨 ${player.name} flees from ${enemy.name}!`);
+      if (battle.players.length > 1) {
+        // party: this member leaves; the rest keep fighting
+        battle.players = battle.players.filter(p => p.id !== player.id);
+        activeBattles.delete(`player_${player.id}`);
+        if (battle.turn === player.id) battle.turn = _alive(battle)[0]?.id || null;
+        if (!_alive(battle).length) return endBattle(battle, "fled");
+        return { ok: true, battle, result: "fled", memberLeft: true };
+      }
       return endBattle(battle, "fled");
     }
     _log(battle, `🚫 ${player.name} tries to flee but is blocked!`);
@@ -2287,9 +2645,24 @@ function _payCost(player, cost) {
   return true;
 }
 
-function enemyTurn(battle, player) {
+/** Pick the enemy's target: a member with the taunt status, else the lowest HP member. */
+function _pickTarget(battle) {
+  const alive = _alive(battle);
+  if (!alive.length) return null;
+  const taunted = alive.find(p => hasStatus(p, "taunt"));
+  if (taunted) return taunted;
+  return alive.sort((a, b) => a.hp - b.hp)[0];
+}
+
+function enemyTurn(battle) {
   if (battle.state !== "active") return;
   const enemy = battle.enemy;
+  const player = _pickTarget(battle);
+  if (!player) return;
+  // enemy statuses tick once per round
+  const eTick = tickStatuses(enemy, { isPlayer: false });
+  for (const l of eTick.log) _log(battle, l);
+  if (enemy.currentHp <= 0) return;
   const skill = enemy.skills.filter(s => !(s.cd > 0)).sort(() => Math.random() - 0.5)[0];
   let usedSkill = false;
   if (skill && chance(0.4)) {
@@ -2307,7 +2680,8 @@ function enemyTurn(battle, player) {
         _log(battle, hit.logLine);
         if (hit.parried) player.counterWindow = true;
         if (skill.statusId && chance(skill.statusChance || 1)) {
-          applyStatus(player, skill.statusId, { potency: Math.max(1, Math.round(enemy.magAtk * 0.08)), duration: 2 });
+          const potency = Math.max(1, Math.round(enemy.magAtk * 0.08) * (enemy.venomous && skill.statusId === "poison" ? 1.3 : 1));
+          applyStatus(player, skill.statusId, { potency, duration: 2 });
           _log(battle, `😵 ${player.name} is afflicted by **${skill.statusId.replace(/_/g, " ")}**!`);
         }
       }
@@ -2329,12 +2703,16 @@ function enemyTurn(battle, player) {
       }
     }
   }
+  // family passive procs (webbed strike, etc.)
+  if (enemy.passiveProc && !player.guarding && chance(enemy.passiveProc.chance || 0.2)) {
+    applyStatus(player, enemy.passiveProc.statusId, { potency: Math.max(1, Math.round(enemy.magAtk * 0.06)), duration: 2 });
+    _log(battle, `🔮 ${enemy.name}'s **${enemy.passive?.name || "passive"}** afflicts ${player.name} with **${enemy.passiveProc.statusId.replace(/_/g, " ")}**!`);
+  }
   if (enemy.lifesteal > 0 && !usedSkill) {
     const healed = Math.min(enemy.maxHp - enemy.currentHp, Math.round(hit.damage * enemy.lifesteal));
     enemy.currentHp += healed;
   }
-  battle.round += 1;
-  if (player.hp <= 0) endBattle(battle, "defeat");
+  if (_allDown(battle)) endBattle(battle, "defeat");
 }
 
 function _absorbShield(player, damage) {
@@ -2348,61 +2726,112 @@ function _absorbShield(player, damage) {
 
 function endBattle(battle, result) {
   battle.state = result;
-  const player = battle.players[0];
+  const playersArr = battle.players;
   const enemy = battle.enemy;
   const outcome = { result, xp: 0, gold: 0, items: [], log: battle.log, battle };
 
   if (result === "victory") {
     enemy.currentHp = 0;
     const xpGain = Math.max(1, Math.round(enemy.xpReward * battle.difficultyMult));
-    const lvl = addExp(player, xpGain);
-    const gold = Math.max(1, Math.round(enemy.goldReward * battle.difficultyMult));
-    player.gold += gold;
-    player.kills += 1;
-    if (player.bestiary) player.bestiary.add(enemy.templateId);
-    // pet / mount / companion xp
-    gainPetXp(player, xpGain);
-    // weapon mastery
-    const wpn = player.equipped?.weapon;
-    if (wpn?.type) gainMastery(player, wpn.type, 1);
-    const loot = rollLoot({ tier: enemy.tier, level: enemy.level, boss: enemy.boss, playerLevel: player.level, lootMult: player.statMultipliers.loot });
-    for (const item of loot.items) {
-      player.inventory[item.name] = (player.inventory[item.name] || 0) + 1;
-      outcome.items.push(itemSummary(item));
-    }
-    player.gold += loot.gold;
-    // currencies from loot
-    if (loot.currencies) {
-      if (!player.currencies) player.currencies = {};
-      for (const [k, v] of Object.entries(loot.currencies)) player.currencies[k] = (player.currencies[k] || 0) + v;
-      outcome.currencies = loot.currencies;
-    }
-    // season xp + guild xp on kills
-    player.seasonXp = (player.seasonXp || 0) + Math.floor(xpGain / 10);
-    if (player.guildId) {
-      const g = require("./schema").guilds.get(player.guildId);
-      if (g) g.xp = (g.xp || 0) + Math.floor(xpGain / 20);
-    }
+    const goldPool = Math.max(1, Math.round(enemy.goldReward * battle.difficultyMult));
+    const survivors = _alive(battle);
+    const n = Math.max(1, survivors.length);
+    const share = Math.floor(goldPool / n);
+    // loot: one roll, distributed round-robin across surviving members
+    const lootMult = survivors[0]?.statMultipliers?.loot || 1;
+    const loot = rollLoot({ tier: enemy.tier, level: enemy.level, boss: enemy.boss, playerLevel: survivors[0]?.level || 1, lootMult });
+
+    survivors.forEach((player, i) => {
+      const lvl = addExp(player, xpGain);
+      player.gold += share;
+      player.kills += 1;
+      if (player.bestiary) player.bestiary.add(enemy.templateId);
+      gainPetXp(player, xpGain);
+      const wpn = equippedItem(player, "weapon");
+      if (wpn?.type) gainMastery(player, wpn.type, 1);
+      // round-robin: every item goes to one member
+      const myItems = loot.items.filter((_, idx) => idx % n === i);
+      for (const item of myItems) {
+        addItemObject(player, item);
+        outcome.items.push(`${itemSummary(item)} → **${player.name}**`);
+      }
+      player.gold += Math.floor(loot.gold / n);
+      if (loot.currencies) {
+        if (!player.currencies) player.currencies = {};
+        for (const [k, v] of Object.entries(loot.currencies)) player.currencies[k] = (player.currencies[k] || 0) + Math.floor(v / n);
+        outcome.currencies = loot.currencies;
+      }
+      player.seasonXp = (player.seasonXp || 0) + Math.floor(xpGain / 10);
+      if (player.guildId) {
+        const g = require("./schema").guilds.get(player.guildId);
+        if (g) g.xp = (g.xp || 0) + Math.floor(xpGain / 20);
+      }
+      if (lvl.leveled) outcome.leveled = true;
+    });
     outcome.xp = xpGain;
-    outcome.gold = gold + loot.gold;
-    outcome.leveled = lvl.leveled;
+    outcome.gold = goldPool + loot.gold;
     outcome.loot = loot.items;
     outcome.victory = true;
-  } else if (result === "defeat") {
-    player.deaths += 1;
-    const penalty = Math.floor(player.gold * 0.05);
-    player.gold -= penalty;
-    outcome.goldPenalty = penalty;
-    if (player.mode === "hardcore" || player.mode === "permadeath") {
-      player.level = 1; player.exp = 0; player.inventory = {}; player.gold = 0;
-      outcome.hardcoreWipe = true;
+
+    // DUNGEON: continue to the next floor automatically
+    if (battle.dungeon) {
+      battle.dungeon.floor += 1;
+      const partyRef = battle.partyId ? require("./schema").parties.get(battle.partyId) : null;
+      if (partyRef) partyRef.dungeon = { ...battle.dungeon };
+      if (battle.dungeon.floor > battle.dungeon.totalFloors) {
+        outcome.dungeonComplete = true;
+        if (partyRef) partyRef.dungeon = null;
+        // completion bonus for every survivor
+        for (const p of survivors) {
+          const bonusXp = Math.floor(xpGain * 1.5);
+          addExp(p, bonusXp);
+          p.gold += Math.floor(goldPool * 2);
+          p.hp = p.maxHp; p.mp = p.maxMp; p.stamina = p.maxStamina;
+        }
+        outcome.dungeonBonus = { xp: Math.floor(xpGain * 1.5), gold: goldPool * 2 };
+      } else {
+        for (const p of survivors) {
+          p.hp = Math.min(p.maxHp, p.hp + Math.round(p.maxHp * 0.2)); // rest between floors
+          p.mp = Math.min(p.maxMp, p.mp + Math.round(p.maxMp * 0.3));
+        }
+        const isBossFloor = battle.dungeon.floor >= battle.dungeon.bossFloor;
+        const zone = require("../world/zones").getZone(battle.zoneId);
+        const top = survivors.reduce((a, b) => (b.level > a.level ? b : a), survivors[0]);
+        const nextEnemy = isBossFloor && zone.worldBoss
+          ? getBossForZone(zone, top.level)
+          : createEnemyInstance({ zoneId: battle.zoneId, playerLevel: top.level, elite: isBossFloor });
+        nextEnemy.difficultyMult = battle.difficultyMult;
+        battle.enemy = nextEnemy;
+        battle.round = 1;
+        battle.state = "active";
+        battle.charging = null;
+        battle.log = [`🏰 **FLOOR ${battle.dungeon.floor}/${battle.dungeon.totalFloors}**${isBossFloor ? " — BOSS FLOOR!" : ""}\n\n${enemyIntro(nextEnemy)}`];
+        outcome.dungeonFloor = battle.dungeon.floor;
+        outcome.dungeonContinue = true;
+        outcome.dungeonBossFloor = isBossFloor;
+        // keep the battle registered; members keep attacking
+        return { ...outcome };
+      }
     }
-    player.hp = 1;
-    player.statusEffects = [];
+  } else if (result === "defeat") {
+    for (const player of playersArr) {
+      player.deaths += 1;
+      const penalty = Math.floor(player.gold * 0.05);
+      player.gold -= penalty;
+      if (player.mode === "hardcore" || player.mode === "permadeath") {
+        player.level = 1; player.exp = 0; player.inventory = {}; player.gold = 0;
+        outcome.hardcoreWipe = true;
+      }
+      player.hp = 1;
+      player.statusEffects = [];
+    }
+    outcome.goldPenalty = Math.floor(playersArr[0].gold * 0.05);
+  } else if (result === "fled") {
+    // nothing extra; some members may already have left
   }
 
   activeBattles.delete(battle.id);
-  activeBattles.delete(`player_${player.id}`);
+  for (const p of playersArr) activeBattles.delete(`player_${p.id}`);
   return { ...outcome };
 }
 
@@ -2417,20 +2846,24 @@ function gainMastery(player, type, amt) { if (_gainMastery) _gainMastery(player,
 
 function battleStatusText(battle) {
   const enemy = battle.enemy;
-  const p = battle.players[0];
-  const effs = p.statusEffects.map(s => s.id).join(", ") || "none";
-  const stance = STANCES[p.stance] || STANCES.balanced;
-  let s = `**Round ${battle.round}** — ${battle.state === "active" ? "⚔️ In combat" : `Over (${battle.state})`}\n\n`;
+  const alive = _alive(battle);
+  let s = `**Round ${battle.round}** — ${battle.state === "active" ? "⚔️ In combat" : `Over (${battle.state})`}${battle.dungeon ? ` | 🏰 Floor ${battle.dungeon.floor}/${battle.dungeon.totalFloors}` : ""}\n\n`;
   s += `${enemyIntro(enemy)}\n\n`;
-  s += `**${p.name}** ❤️ ${p.hp}/${p.maxHp} 🔷 ${p.mp}/${p.maxMp} ⚡ ${p.stamina}/${p.maxStamina}\n`;
-  s += `${stance.emoji} Stance: ${stance.name} | 🔗 Combo: ${p.combo || 0}${battle.charging ? " | 🔋 Charging!" : ""}\n`;
-  s += `Status: ${effs}`;
+  for (const p of alive) {
+    const turn = battle.turn === p.id ? " 🎯" : "";
+    const stance = STANCES[p.stance] || STANCES.balanced;
+    s += `**${p.name}**${turn} ❤️ ${p.hp}/${p.maxHp} 🔷 ${p.mp}/${p.maxMp} ⚡ ${p.stamina}/${p.maxStamina} ${stance.emoji} 🔗${p.combo || 0}\n`;
+  }
+  const down = battle.players.filter(p => p.hp <= 0);
+  if (down.length) s += `💀 Down: ${down.map(p => p.name).join(", ")}\n`;
+  if (battle.players.length > 1) s += `\nTurn: **${battle.players.find(p => p.id === battle.turn)?.name || "—"}** (party of ${battle.players.length})`;
   return s;
 }
 
 module.exports = {
-  ABILITIES, ULTIMATES, STANCES, ITEM_EFFECTS, computeHit,
-  startEncounter, getPlayerBattle, playerAction, enemyTurn, endBattle,
+  ABILITIES, ULTIMATES, STANCES, ITEM_EFFECTS, STARTER_ABILITIES,
+  WEAPON_SKILLS, WEAPON_PASSIVES, weaponPassive, weaponSkillsFor, computeHit,
+  startEncounter, startPartyEncounter, getPlayerBattle, playerAction, enemyTurn, endBattle,
   battleStatusText, bindProgressionHooks,
 };
 });
@@ -2608,7 +3041,7 @@ __def("src/core/progression", function (module, exports, require) {
 // ============================================================
 
 const { WORLD, CLASSES, SUBCLASSES } = require("../config");
-const { clamp, fmtShort } = require("../util");
+const { clamp, fmtShort, fmt } = require("../util");
 const { refreshStats, addExp, players } = require("./schema");
 
 // ------------------------------------------------------------
@@ -3033,7 +3466,10 @@ function getReputationRank(player, factionId) {
 }
 function getFactionRank(player) { return Math.max(1, Math.floor(getAdventureRank(player) / 2)); }
 function getGuildLevel(guild) { return Math.floor(Math.sqrt((guild?.xp || 0) / 100)) + 1; }
-function getWeaponLevel(player) { return player.equipped?.weapon?.level || 1; }
+function getWeaponLevel(player) {
+  const w = require("./schema").equippedItem(player, "weapon");
+  return w?.level || 1;
+}
 function getSkillLevelFor(player, skillId) { return player.skills?.[skillId] || 1; }
 
 function ranksText(player) {
@@ -3042,13 +3478,65 @@ function ranksText(player) {
   s += `Character Level: **${p.level}**${p.prestige ? ` | Prestige: **${p.prestige}**` : ""}\n`;
   s += `Ascension Rank: **${getAscensionRank(p)}** | Awakening Rank: **${getAwakeningRank(p)}** | Legacy Rank: **${getLegacyRank(p)}**\n`;
   s += `Class Rank: **${getClassRank(p)}** | Adventure Rank: **${getAdventureRank(p)}**\n`;
-  s += `Mastery Rank: **${masteryRank(p, p.equipped?.weapon?.type || "sword")}** (${p.equipped?.weapon?.type || "sword"}) | Weapon Level: **${getWeaponLevel(p)}**\n`;
+  const wType = require("./schema").equippedItem(p, "weapon")?.type || "sword";
+  s += `Mastery Rank: **${masteryRank(p, wType)}** (${wType}) | Weapon Level: **${getWeaponLevel(p)}**\n`;
   s += `Crafting Rank: **${getCraftingRank(p)}** | Collection Rank: **${getCollectionRank(p)}**\n`;
   s += `Season Rank: **${getSeasonRank(p)}** (${p.seasonXp || 0} season XP) | Challenge Rank: **${getChallengeRank(p)}**\n`;
   if (p.activePet) s += `Pet: **${p.activePet}** Lv ${petLevel(p, p.activePet)}\n`;
   if (p.activeMount) s += `Mount: **${p.activeMount}** Lv ${mountLevel(p, p.activeMount)}\n`;
   if (p.quests?.totalCompleted) s += `Faction Rank: **${getFactionRank(p)}**\n`;
   return s;
+}
+
+// ============================================================
+// GATHERING & PROFESSION SKILL XP (curve-based leveling)
+// No more "+1 level per action": each action grants XP, and the
+// level only rises when the cumulative XP crosses a threshold.
+// ============================================================
+
+/** XP needed to go from level -> level+1. */
+function skillXpNeeded(level) { return Math.floor(40 * Math.pow(level, 1.6)); }
+/** Cumulative XP required to REACH a level (level 1 = 0). */
+function cumulativeSkillXp(level) {
+  let s = 0;
+  for (let i = 1; i < level; i++) s += skillXpNeeded(i);
+  return s;
+}
+function getSkillLevel(player, kind, key) {
+  const map = kind === "profession" ? player.professions : player.skills;
+  return map?.[key] || 1;
+}
+/** Grant XP to a gathering skill ('skill') or profession ('profession'). */
+function gainSkillXp(player, kind, key, amount) {
+  if (!amount || amount <= 0) return { leveled: false, level: getSkillLevel(player, kind, key), xp: 0, nextXp: 0 };
+  const xpMap = kind === "profession" ? (player.professionXp = player.professionXp || {}) : (player.skillXp = player.skillXp || {});
+  const lvlMap = kind === "profession" ? player.professions : player.skills;
+  // migrate legacy numeric-level saves: seed xp from the stored level
+  if (xpMap[key] == null) xpMap[key] = cumulativeSkillXp(lvlMap?.[key] || 1);
+  xpMap[key] += amount;
+  let level = lvlMap[key] || 1;
+  let leveled = false;
+  while (xpMap[key] >= cumulativeSkillXp(level + 1)) {
+    level += 1;
+    leveled = true;
+  }
+  lvlMap[key] = level;
+  return { leveled, level, xp: xpMap[key], nextXp: cumulativeSkillXp(level + 1), gained: amount };
+}
+/** "Lv 3 (120/180 XP)" progress text. */
+function skillProgressText(player, kind, key) {
+  const level = getSkillLevel(player, kind, key);
+  const xpMap = kind === "profession" ? player.professionXp : player.skillXp;
+  const xp = xpMap?.[key] ?? cumulativeSkillXp(level);
+  return `Lv ${level} (${fmt(xp)}/${fmt(cumulativeSkillXp(level + 1))} XP)`;
+}
+/** Force a skill/profession to a level (seeds the xp floor). */
+function setSkillLevel(player, kind, key, level) {
+  const xpMap = kind === "profession" ? (player.professionXp = player.professionXp || {}) : (player.skillXp = player.skillXp || {});
+  const lvlMap = kind === "profession" ? player.professions : player.skills;
+  lvlMap[key] = level;
+  xpMap[key] = cumulativeSkillXp(level);
+  return level;
 }
 
 // wire combat rewards into progression
@@ -3076,6 +3564,8 @@ module.exports = {
   getCraftingRank, getCollectionRank, getSeasonRank, gainSeasonXp,
   getChallengeRank, getLegacyRank, getReputationRank, getFactionRank,
   getGuildLevel, getWeaponLevel, getSkillLevelFor, ranksText,
+  skillXpNeeded, cumulativeSkillXp, getSkillLevel, gainSkillXp,
+  skillProgressText, setSkillLevel,
 };
 });
 
@@ -3339,10 +3829,10 @@ function computeDerived(p) {
   // Base vitals are FIXED: 100 HP / 50 MP / 60 stamina at level 1.
   // Each level adds stats: +6 HP, +3 MP, +2 stamina, +ATK/MATK/DEF/MDEF/speed.
   // Attributes give offsets on top (con above 5 = +2 HP each, etc.).
-  const weaponAtk = p.equipped.weapon?.statBonus?.atk || 0;
-  const weaponMag = p.equipped.weapon?.statBonus?.magAtk || 0;
-  const armorDef = (p.equipped.armor?.statBonus?.def || 0) +
-                   (p.equipped.offhand?.statBonus?.def || 0);
+  const weaponAtk = equippedItem(p, "weapon")?.statBonus?.atk || 0;
+  const weaponMag = equippedItem(p, "weapon")?.statBonus?.magAtk || 0;
+  const armorDef = (equippedItem(p, "armor")?.statBonus?.def || 0) +
+                   (equippedItem(p, "offhand")?.statBonus?.def || 0);
 
   return {
     maxHp: Math.floor(100 + (lvl - 1) * 6 + (a.con - 5) * 2),
@@ -3424,6 +3914,7 @@ function createPlayer(userId, username) {
     bankGold: 0,
     currencies: {},           // gems, tokens, faction/guild/dungeon/raid/event/crafting/trade
     inventory: { "Health Potion (S)": 3, "Iron Ore": 2, "Oak Log": 5 },
+    itemInstances: [],        // every gear piece as a unique instance
     bankItems: {},
     storageItems: {},         // housing storage
     equipped: { weapon: null, offhand: null, armor: null, helm: null, boots: null, gloves: null, amulet: null, ring1: null, ring2: null, relic: null },
@@ -3494,6 +3985,103 @@ function removeItem(p, item, n = 1) {
 }
 function consumeItems(p, req) {
   for (const [k, v] of Object.entries(req)) removeItem(p, k, v);
+}
+
+// ---------- REAL ITEM INSTANCES ----------
+// Every looted/crafted piece of gear is a UNIQUE instance with its own
+// rarity/affixes — looting a second "Iron Staff" never overwrites the first.
+// Counts live in p.inventory; equipped slots store instance uids.
+const GEAR_LIKE = new Set(["cursed", "set", "collectible", "cosmetic", "treasure", "event", "limited", "relic", "upgrade", "quest", "account"]);
+
+function getItemObject(p, name) { return getItemInstance(p, name) || null; }
+function setItemObject(p, item) { return addItemObject(p, item, 0); }
+function isGearLike(item) {
+  if (!item) return false;
+  if (item.statBonus && Object.keys(item.statBonus).length > 0) return true;
+  if (item.affixes && item.affixes.length > 0) return true;
+  if (item.set || item.cursed) return true;
+  return false;
+}
+function ensureInstances(p) { if (!Array.isArray(p.itemInstances)) p.itemInstances = []; return p.itemInstances; }
+
+/** Add an item: counts for everything, a unique instance for gear. */
+function addItemObject(p, item, n = 1) {
+  if (!item) return null;
+  if (isGearLike(item)) {
+    const inst = { ...item, uid: item.uid || `itm_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` };
+    ensureInstances(p).push(inst);
+    addItem(p, item.name || "Mystery Item", n);
+    return inst;
+  }
+  addItem(p, item.name || "Mystery Item", n);
+  return null;
+}
+
+/** Best instance by name (highest rarity weight, then value). */
+function getItemInstance(p, name) {
+  const list = ensureInstances(p).filter(i => i.name === name);
+  if (!list.length) return null;
+  const RANK = { common: 0, uncommon: 1, rare: 2, epic: 3, legendary: 4, mythic: 5, artifact: 6 };
+  return list.sort((a, b) => (RANK[b.rarityId] || 0) - (RANK[a.rarityId] || 0) || (b.value || 0) - (a.value || 0))[0];
+}
+function getInstancesByName(p, name) { return ensureInstances(p).filter(i => i.name === name); }
+function countInstancesByName(p, name) { return getInstancesByName(p, name).length; }
+
+/** Resolve an equipped slot (uid string) to its instance. */
+function equippedItem(p, slot) {
+  const uid = p.equipped?.[slot];
+  if (!uid) return null;
+  return ensureInstances(p).find(i => i.uid === uid) || null;
+}
+
+/** Equip the best instance of a name; returns {ok, instance, old}. */
+function equipByName(p, name) {
+  const inst = getItemInstance(p, name);
+  if (!inst) return { ok: false, reason: "no_instance" };
+  const slot = inst.slot === "ring" ? (p.equipped.ring1 ? "ring2" : "ring1") : inst.slot;
+  if (!(slot in p.equipped)) return { ok: false, reason: "bad_slot" };
+  const old = equippedItem(p, slot);
+  if (old && old.uid === inst.uid) return { ok: false, reason: "already_equipped" };
+  if (old) addItem(p, old.name, 1);            // return old to bag
+  p.equipped[slot] = inst.uid;
+  removeItem(p, name, 1);                       // take from bag
+  return { ok: true, instance: inst, old, slot };
+}
+function unequipSlot(p, slot) {
+  const old = equippedItem(p, slot);
+  if (!old) return { ok: false, reason: "empty" };
+  addItem(p, old.name, 1);
+  p.equipped[slot] = null;
+  return { ok: true, instance: old };
+}
+
+/** Remove the WORST instance of a name (selling keeps the best). */
+function removeWorstInstance(p, name) {
+  const list = getInstancesByName(p, name);
+  if (!list.length) return null;
+  const RANK = { common: 0, uncommon: 1, rare: 2, epic: 3, legendary: 4, mythic: 5, artifact: 6 };
+  const worst = list.sort((a, b) => (RANK[a.rarityId] || 0) - (RANK[b.rarityId] || 0) || (a.value || 0) - (b.value || 0))[0];
+  p.itemInstances = ensureInstances(p).filter(i => i.uid !== worst.uid);
+  return worst;
+}
+
+/** Migrate legacy saves: itemObjects map -> instances; equipped object-refs -> uids. */
+function migratePlayer(p) {
+  ensureInstances(p);
+  if (p.itemObjects && Object.keys(p.itemObjects).length && !p.itemInstances.length) {
+    for (const o of Object.values(p.itemObjects)) {
+      p.itemInstances.push({ ...o, uid: o.uid || `itm_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` });
+    }
+  }
+  delete p.itemObjects;
+  for (const slot of Object.keys(p.equipped || {})) {
+    const e = p.equipped[slot];
+    if (e && typeof e === "object") {
+      const match = p.itemInstances.find(i => i.name === e.name && i.rarityId === e.rarityId);
+      p.equipped[slot] = match ? match.uid : null;
+    }
+  }
+  return p;
 }
 
 // ---------- XP / LEVEL HELPERS (curve in util.xpForLevel) ----------
@@ -3614,6 +4202,7 @@ function loadAll() {
     for (const [id, p] of data.players || []) {
       const player = deserializeEntity(p);
       player.nextExp = xpForLevel(player.level);
+      migratePlayer(player); // legacy itemObjects/equipped-object saves -> instances/uids
       players.set(id, player);
     }
     return players.size > 0;
@@ -3625,6 +4214,9 @@ module.exports = {
   createPlayer, getOrCreatePlayer, savePlayer,
   computeDerived, refreshStats, addExp, xpForLevel, onLevelUp,
   countItem, hasItems, addItem, removeItem, consumeItems,
+  getItemObject, setItemObject, addItemObject, isGearLike,
+  getItemInstance, getInstancesByName, countInstancesByName,
+  equippedItem, equipByName, unequipSlot, removeWorstInstance, migratePlayer,
   createParty, getParty, createGuild, getGuild,
   saveAll, loadAll,
 };
@@ -4124,8 +4716,8 @@ __def("src/crafting/recipes", function (module, exports, require) {
 // enchanting, refining. Pure Node.
 // ============================================================
 
-const { hasItems, consumeItems, addItem, countItem } = require("../core/schema");
-const { pick, randInt, chance, cap } = require("../util");
+const { hasItems, consumeItems, addItem, countItem, setItemObject } = require("../core/schema");
+const { pick, randInt, chance, cap, slug } = require("../util");
 
 // ---- handcrafted core recipes ----------------------------------
 const CORE_RECIPES = {
@@ -4531,10 +5123,39 @@ function craftItem(player, recipeId) {
   const qty = r.result.qty * (isCrit ? 2 : 1);
   addItem(player, r.result.name, qty);
 
+  // profession XP (curve-based leveling — no instant level-ups)
+  let xpMsg = "";
   if (r.profession && r.profession !== "none") {
-    player.professions[r.profession] += r.professionXp;
+    const gx = require("../core/progression").gainSkillXp(player, "profession", r.profession, r.professionXp * (isCrit ? 2 : 1));
+    if (gx.leveled) xpMsg = `\n⬆️ **${cap(r.profession)} LEVEL UP!** Now **Lv ${gx.level}**!`;
   }
-  const msg = `🛠️ **CRAFTING SUCCESS!** Created **${qty}x ${r.result.name}**${isCrit ? " — ⭐ CRITICAL CRAFT (x2)!" : ""}!`;
+
+  // crafted gear becomes a REAL item object so equipping keeps its stats
+  if (r.result.statBonus) {
+    const rarity = isCrit ? "rare" : "uncommon";
+    setItemObject(player, {
+      id: `crafted_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      name: r.result.name,
+      rarityId: rarity,
+      rarityName: cap(rarity),
+      color: rarity === "rare" ? 0x2196f3 : 0x4caf50,
+      slot: r.category === "weapon" ? "weapon" : r.category === "armor" || r.category === "tool" ? "armor" : "relic",
+      type: r.category === "weapon" ? "sword" : "armor",
+      kind: "equipment",
+      kindName: "Equipment",
+      tier: r.tier,
+      level: 1,
+      element: "physical",
+      value: Math.floor(r.tier * 10),
+      statBonus: r.result.statBonus,
+      affixes: isCrit ? [{ name: "Mastercraft", stat: "critChance", value: 0.02, desc: "+2% crit" }] : [],
+      sockets: isCrit ? 1 : 0,
+      gems: [],
+      legendary: false,
+    });
+  }
+
+  const msg = `🛠️ **CRAFTING SUCCESS!** Created **${qty}x ${r.result.name}**${isCrit ? " — ⭐ CRITICAL CRAFT (x2)!" : ""}!${xpMsg}`;
   return { ok: true, message: msg, recipe: r, crafted: [{ name: r.result.name, qty }], crit: isCrit, goldCost };
 }
 
@@ -4580,7 +5201,9 @@ function enchantItem(player, item, enchantId) {
   if (!item.affixes) item.affixes = [];
   item.affixes.push({ name: enc.name, stat: enc.stat, value: enc.value, fromEnchant: true });
   item.value = Math.floor(item.value * 1.5);
-  return { ok: true, item, message: `✨ **${item.name}** has been enchanted with **${enc.name}**!` };
+  const gx = require("../core/progression").gainSkillXp(player, "profession", "enchanting", 6 + enc.tier);
+  const lvl = gx.leveled ? `\n⬆️ **ENCHANTING LEVEL UP!** Now **Lv ${gx.level}**!` : "";
+  return { ok: true, item, message: `✨ **${item.name}** has been enchanted with **${enc.name}**!${lvl}` };
 }
 
 // ---- refining ------------------------------------------------
@@ -4599,8 +5222,12 @@ function refineItem(player, refineId) {
   if (!hasItems(player, r.input)) return { ok: false, reason: "missing_materials" };
   consumeItems(player, r.input);
   addItem(player, r.output, r.qty);
-  if (r.profession && player.professions[r.profession]) player.professions[r.profession] += r.xp;
-  return { ok: true, message: `⚒️ Refined **${r.qty}x ${r.output}**!`, output: r.output, qty: r.qty };
+  let xpMsg = "";
+  if (r.profession && player.professions[r.profession]) {
+    const gx = require("../core/progression").gainSkillXp(player, "profession", r.profession, r.xp);
+    if (gx.leveled) xpMsg = `\n⬆️ **${cap(r.profession)} LEVEL UP!** Now **Lv ${gx.level}**!`;
+  }
+  return { ok: true, message: `⚒️ Refined **${r.qty}x ${r.output}**!${xpMsg}`, output: r.output, qty: r.qty };
 }
 
 const CRAFTING_STATIONS = [
@@ -4817,6 +5444,54 @@ const ENEMY_SKILLS = [
   { id: "charge",        name: "Charge",         power: 1.6, element: "physical", statusId: "knockback", statusChance: 0.5, cooldown: 4 },
 ];
 
+// ---- family-themed skill pools (every enemy fights in style) ----
+const FAMILY_SKILL_POOLS = {
+  goblin:     ["venom_bite", "charge"],
+  orc:        ["enrage", "slam"],
+  wolf:       ["rend", "enrage"],
+  slime:      ["leech", "venom_bite"],
+  skeleton:   ["slam", "rend"],
+  zombie:     ["leech", "venom_bite"],
+  spider:     ["venom_bite", "rend"],
+  bat:        ["rend", "scream"],
+  bandit:     ["charge", "venom_bite"],
+  cultist:    ["fireball", "shadow_bolt", "scream"],
+  elemental:  ["fireball", "slam", "frost_strike"],
+  construct:  ["slam", "charge"],
+  insect:     ["venom_bite", "rend"],
+  plant:      ["venom_bite", "leech"],
+  serpent:    ["venom_bite", "rend"],
+  bird:       ["charge", "scream"],
+  fish:       ["leech", "frost_strike"],
+  spirit:     ["shadow_bolt", "scream", "frost_strike"],
+  demon:      ["fireball", "shadow_bolt", "slam"],
+  giant:      ["slam", "charge", "enrage"],
+};
+
+// ---- family passives (all enemies have one, not just elites) ----
+const FAMILY_PASSIVES = {
+  goblin:    { id: "cunning",      name: "Cunning",        desc: "+5% dodge",                    apply: (e) => { e.dodge += 0.05; } },
+  orc:       { id: "bloodlust",    name: "Bloodlust",      desc: "+15% ATK below 50% HP",        apply: (e) => { e.bloodlust = true; } },
+  wolf:      { id: "pack_hunter",  name: "Pack Hunter",    desc: "+20% speed",                   apply: (e) => { e.speed *= 1.2; } },
+  slime:     { id: "gel_body",     name: "Gel Body",       desc: "+60% poison resist",           apply: (e) => { e.resistances.poison = Math.min(0.9, (e.resistances.poison || 0) + 0.6); } },
+  skeleton:  { id: "bone_shield",  name: "Bone Shield",    desc: "+20% DEF",                     apply: (e) => { e.def *= 1.2; } },
+  zombie:    { id: "undead",       name: "Undead",         desc: "Immune to poison",             apply: (e) => { e.resistances.poison = 1; } },
+  spider:    { id: "webbed",       name: "Webbed Strike",  desc: "Slows on hit",                 apply: (e) => { e.passiveProc = { statusId: "slow", chance: 0.3 }; } },
+  bat:       { id: "echolocation", name: "Echolocation",   desc: "+10% dodge",                   apply: (e) => { e.dodge += 0.1; } },
+  bandit:    { id: "looted_armor", name: "Looted Armor",   desc: "+10% DEF",                     apply: (e) => { e.def *= 1.1; } },
+  cultist:   { id: "dark_ritual",  name: "Dark Ritual",    desc: "+15% magic ATK",               apply: (e) => { e.magAtk *= 1.15; } },
+  elemental: { id: "elemental_body", name: "Elemental Body", desc: "+30% all resists",           apply: (e) => { for (const k in e.resistances) e.resistances[k] = Math.min(0.9, (e.resistances[k] || 0) + 0.3); } },
+  construct: { id: "hardened",     name: "Hardened",       desc: "+30% DEF",                     apply: (e) => { e.def *= 1.3; } },
+  insect:    { id: "chitin",       name: "Chitin",         desc: "+15% DEF, +40% poison resist", apply: (e) => { e.def *= 1.15; e.resistances.poison = Math.min(0.9, (e.resistances.poison || 0) + 0.4); } },
+  plant:     { id: "thorns",       name: "Thorns",         desc: "Reflects 10% of damage",       apply: (e) => { e.thorns = 0.1; } },
+  serpent:   { id: "venomous",     name: "Venomous",       desc: "+30% poison potency",          apply: (e) => { e.venomous = true; } },
+  bird:      { id: "swoop",        name: "Swoop",          desc: "+25% speed",                   apply: (e) => { e.speed *= 1.25; } },
+  fish:      { id: "slippery",     name: "Slippery",       desc: "+8% dodge",                    apply: (e) => { e.dodge += 0.08; } },
+  spirit:    { id: "incorporeal",  name: "Incorporeal",    desc: "+15% dodge",                   apply: (e) => { e.dodge += 0.15; } },
+  demon:     { id: "infernal",     name: "Infernal",       desc: "+50% fire resist, +10% ATK",   apply: (e) => { e.resistances.fire = Math.min(0.9, (e.resistances.fire || 0) + 0.5); e.atk *= 1.1; } },
+  giant:     { id: "colossal",     name: "Colossal",       desc: "+20% DEF, +20% max HP",        apply: (e) => { e.def *= 1.2; e.hp = Math.floor(e.hp * 1.2); } },
+};
+
 // ---- elite modifiers -----------------------------------------
 const ELITE_MODIFIERS = [
   { id: "armored",      name: "Armored",      desc: "+60% DEF", apply: (e) => { e.def *= 1.6; } },
@@ -4911,7 +5586,14 @@ function createEnemyInstance({ zoneId, playerLevel, elite = false, boss = false,
     resistances: { ...tmpl.resistances },
     currentHp: null,
     statusEffects: [],
-    skills: [pick(ENEMY_SKILLS), pick(ENEMY_SKILLS)].slice(0, chance(0.5) ? 2 : 3),
+    skills: (FAMILY_SKILL_POOLS[tmpl.family] || ["rend"]).slice()
+      .sort(() => Math.random() - 0.5)
+      .slice(0, chance(0.5) ? 2 : 3)
+      .map(id => ({ ...ENEMY_SKILLS.find(s => s.id === id), cd: 0 })),
+    passive: null,
+    passiveProc: null,
+    bloodlust: false,
+    venomous: false,
     elite,
     boss,
     isWorldBoss: !!zone.worldBoss,
@@ -4928,6 +5610,13 @@ function createEnemyInstance({ zoneId, playerLevel, elite = false, boss = false,
   e.currentHp = e.hp;
   e.maxHp = e.hp;
 
+  // family passive — every enemy has one
+  const famPassive = FAMILY_PASSIVES[tmpl.family];
+  if (famPassive) {
+    famPassive.apply(e);
+    e.passive = { id: famPassive.id, name: famPassive.name, desc: famPassive.desc };
+  }
+
   if (elite) {
     const n = randInt(1, 2);
     const mods = [...ELITE_MODIFIERS].sort(() => Math.random() - 0.5).slice(0, n);
@@ -4936,6 +5625,9 @@ function createEnemyInstance({ zoneId, playerLevel, elite = false, boss = false,
       m.apply(e);
     }
   }
+  // keep hp in sync after passives/modifiers that raised it (enemy spawns full)
+  e.maxHp = e.hp;
+  e.currentHp = e.maxHp;
   if (e.regenerates) e.statusEffects.push({ id: "regeneration", stacks: 1, duration: -1, potency: Math.max(1, Math.floor(e.maxHp * 0.02)) });
   return e;
 }
@@ -4965,6 +5657,8 @@ function enemySummary(e) {
 function enemyIntro(e) {
   let s = `${e.introText}\n\n**${e.name}** — Lv ${e.level}\n`;
   if (e.eliteModifiers.length) s += `Modifiers: ${e.eliteModifiers.map(m => ELITE_MODIFIERS.find(x => x.id === m)?.name).join(", ")}\n`;
+  if (e.passive) s += `🔮 Passive: **${e.passive.name}** — ${e.passive.desc}\n`;
+  if (e.skills?.length) s += `⚡ Skills: ${e.skills.map(s => s.name).join(", ")}\n`;
   s += `Elements: ${e.elements.map(el => ELEMENT_EMOJI[el] || "").join(" ")}\n`;
   s += `HP ${e.currentHp}/${e.maxHp}`;
   return s;
@@ -4972,6 +5666,7 @@ function enemyIntro(e) {
 
 module.exports = {
   FAMILIES, VARIANTS, BANDS, ENEMY_SKILLS, ELITE_MODIFIERS, FACTIONS,
+  FAMILY_SKILL_POOLS, FAMILY_PASSIVES,
   ENEMY_REGISTRY, createEnemyInstance, getEnemyForZone, getBossForZone,
   getEnemyFactions, enemySummary, enemyIntro,
 };
@@ -5721,6 +6416,10 @@ function generateQuest(player, { type = "side", zoneId = null } = {}) {
     description = `A local request near ${zone.name}.`;
     const kind = obj.kind;
     objectives = [{ kind, target: fill(obj.target || ""), count: obj.count, current: 0, label: `${cap(kind)} ${obj.count}x ${fill(obj.target || "")}` }];
+    // travel/escort/explore objectives must track by zone ID, not name
+    if (["travel", "escort", "explore"].includes(kind) && !/^\d+$/.test(objectives[0].target)) {
+      objectives[0].target = String(zone.id);
+    }
     reward.items.push({ name: pick(["Gold", "Iron Ore", "Health Potion (S)"]), qty: 3 });
   } else if (type === "daily") {
     const fam = _familyForZone(zone.id);
@@ -5936,7 +6635,9 @@ function completeQuest(player, questId) {
   const idx = (player.quests.active || []).findIndex(q => q.id === questId);
   if (idx === -1) return { ok: false, reason: "not_found" };
   const [quest] = player.quests.active.splice(idx, 1);
-  player.exp += quest.reward.xp;
+  // quest XP goes through the real level-up pipeline (so quests can level you)
+  const { addExp } = require("../core/schema");
+  const leveled = addExp(player, quest.reward.xp);
   player.gold += quest.reward.gold;
   for (const it of quest.reward.items || []) {
     if (it.name === "Gold") player.gold += it.qty * 10;
@@ -5967,7 +6668,7 @@ function completeQuest(player, questId) {
   if (!player.quests.completed) player.quests.completed = [];
   player.quests.completed.push(quest.id);
   player.quests.totalCompleted = (player.quests.totalCompleted || 0) + 1;
-  return { ok: true, quest, rewards: quest.reward, chainNext };
+  return { ok: true, quest, rewards: quest.reward, chainNext, leveled: leveled.leveled };
 }
 
 function getDailyQuests(player) {
