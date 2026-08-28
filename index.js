@@ -1874,11 +1874,14 @@ const handlers = {
       const party = getParty(player);
       party.members = party.members.filter(m => m.id !== player.id);
       player.partyId = null;
+      // drop out of any active battle too, so a future hunt starts fresh
+      const lb = require("../core/combat").leaveBattle(player.id);
+      const inFight = lb.ok ? " You left the fight." : "";
       if (party.members.length === 0) {
         require("../core/schema").parties.delete(party.id);
-        return "👋 You left (and disbanded) the party.";
+        return `👋 You left (and disbanded) the party.${inFight}`;
       }
-      return `👋 You left the party. (${party.members.length} members remain)`;
+      return `👋 You left the party. (${party.members.length} members remain)${inFight}`;
     }
     if (action === "hunt" || action === "dungeon") {
       const party = getParty(player);
@@ -2840,6 +2843,32 @@ function getPlayerBattle(playerId) {
   return activeBattles.get(`player_${playerId}`) || null;
 }
 
+/** Drop a player from any active battle (party leave, etc.). */
+function leaveBattle(playerId) {
+  const battle = activeBattles.get(`player_${playerId}`);
+  if (!battle) return { ok: false };
+  battle.players = battle.players.filter(p => p.id !== playerId);
+  activeBattles.delete(`player_${playerId}`);
+  if (battle.corruptedPlayerRefs) delete battle.corruptedPlayerRefs[playerId];
+  if (battle.sanity) delete battle.sanity[playerId];
+  if (!battle.players.length) {
+    // nobody left: the battle dies with the party
+    activeBattles.delete(battle.id);
+    if (battle.boss) {
+      if (bossBattles.map === battle) bossBattles.map = null;
+      if (bossBattles.server === battle) bossBattles.server = null;
+    }
+    if (battle.partyId) {
+      const party = require("./schema").parties.get(battle.partyId);
+      if (party) party.dungeon = null;
+    }
+  } else if (battle.turn === playerId) {
+    // pass the turn to whoever is left
+    battle.turn = battle.players.find(p => p.hp > 0)?.id || battle.players[0]?.id || null;
+  }
+  return { ok: true, battle };
+}
+
 // ---- BOSS BATTLES (map bosses + server bosses) -------------------
 const bossBattles = { map: null, server: null };
 
@@ -3586,7 +3615,7 @@ module.exports = {
   WEAPON_SKILLS, WEAPON_PASSIVES, weaponPassive, weaponSkillsFor, computeHit,
   startEncounter, startPartyEncounter, startBossEncounter, getBossBattle,
   joinBossBattle, bossBattles,
-  getPlayerBattle, playerAction, enemyTurn, endBattle,
+  getPlayerBattle, playerAction, enemyTurn, endBattle, leaveBattle,
   battleStatusText, battleTargets, bindProgressionHooks,
 };
 });
